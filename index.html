@@ -1,0 +1,2963 @@
+<!DOCTYPE html>
+<!--
+============================================================
+  手机 Excel 盘点工具（H5 网页应用 · 纯前端 · 单文件）
+============================================================
+  功能流程：
+    首页文件库（自动保存/打开/删除）→ 导入 .xlsx →
+    自动识别红色表头列 = 待填写项 → 盘点模式：
+      按表头字段搜索（自动补全）→ 点开记录填「问卷」：
+      可点选字段（使用状况/记录状况）点选项，其余打字，
+      图片字段连续拍照多张 → 保存自动入库 → 导出分享到微信
+
+  依赖（CDN 加载，首次打开需联网，均带国内镜像回退）：
+    · SheetJS xlsx 0.20.3 —— Excel 文件解析与基础导出
+      （不可达时自动回退 npmmirror 镜像 0.18.5，功能一致）
+    · JSZip 3.10.1       —— 导出后处理：注入图片与原生复选框
+      （不可达时自动回退 bootcdn 镜像）
+
+  安全承诺：
+    · 上传的文件仅做只读解析，全部编辑都在内存副本上进行；
+    · 导出生成的是一个全新文件，绝不修改、覆盖设备上的原文件。
+
+  本地持久化：
+    · 每次改动自动保存进浏览器 IndexedDB（首页文件库）；
+    · 清除浏览器数据前请先「保存分享」导出到手机/微信。
+
+  已知限制（如实说明）：
+    · SheetJS 社区版不含图片解析代码（图片读写为 Pro 功能），
+      原文件里已有的图片无法被读取显示；但本工具新拍的图片
+      由工具自行管理，导出后 Excel 打开正常显示、随单元格移动。
+
+  技术要点：
+    · 虚拟滚动表格渲染（只渲染可视区域的单元格，超大表不卡顿）；
+    · 撤销/重做基于"操作前后快照"实现，最多保留 100 步；
+    · 红色列检测兼容 SheetJS 两种样式结构（嵌套 fill 与摊平的
+      patternType/fgColor），红色判定 R>=170 且 G,B<=120；
+    · 可点选字段：表头含「使用状况」「记录状况」；选项取该列
+      已有值去重，列为空时用盘点常用词兜底；
+    · 复选框状态同步写入单元格布尔值（TRUE/FALSE），
+      导出时再注入 Excel 原生复选框表单控件（VML 传统方案，
+      Excel 2007+ / WPS 均可交互勾选）；
+    · 图片以 xdr drawing 部件锚定到单元格内（oneCellAnchor +
+      ext 尺寸，多张并排均分，结构与 exceljs 等成熟库产出的
+      经 Excel 验证的格式一致）；
+    · 微信转发走系统分享面板（Web Share API），不支持时自动
+      回退为下载文件。
+============================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#2f6bff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Excel盘点工具">
+<meta name="application-name" content="Excel盘点工具">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%232f6bff'/><text x='50' y='68' font-size='52' text-anchor='middle' fill='white'>📊</text></svg>">
+<title>📊 Excel 盘点工具</title>
+<style>
+/* ==================== 基础 ==================== */
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 15px; color: #1c2430; background: #eef1f5;
+  height: 100vh; height: 100dvh;
+  overflow: hidden;              /* 单页应用，禁止整页滚动 */
+  touch-action: manipulation;    /* 避免双击缩放 */
+  user-select: none; -webkit-user-select: none;
+}
+button { font-family: inherit; cursor: pointer; border: none; background: none; padding: 0; color: inherit; }
+input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS 聚焦自动放大 */
+[hidden] { display: none !important; }
+
+/* ==================== 上传页 ==================== */
+#uploadScreen {
+  position: fixed; inset: 0; z-index: 100; background: #eef1f5;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+}
+.up-card {
+  width: 100%; max-width: 400px; background: #fff; border-radius: 20px;
+  padding: 32px 24px; text-align: center; box-shadow: 0 8px 30px rgba(28,36,48,.08);
+}
+.up-icon { font-size: 56px; line-height: 1; margin-bottom: 12px; }
+.up-card h1 { font-size: 21px; margin: 0 0 10px; }
+.up-desc { font-size: 13.5px; color: #5b6572; line-height: 1.7; margin: 0 0 22px; }
+.btn-primary.big {
+  display: block; width: 100%; min-height: 50px; border-radius: 12px;
+  background: #2f6bff; color: #fff; font-size: 17px; font-weight: 600;
+  box-shadow: 0 4px 14px rgba(47,107,255,.35);
+}
+.btn-primary.big:active { transform: scale(.98); }
+.btn-plain { margin-top: 14px; min-height: 44px; color: #2f6bff; font-size: 15px; }
+.up-note { margin-top: 18px; font-size: 12px; color: #98a1ad; line-height: 1.6; }
+
+/* ==================== 主界面布局 ==================== */
+#mainScreen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: #fff; padding: 6px 10px;
+  padding-top: calc(6px + env(safe-area-inset-top));
+  border-bottom: 1px solid #e3e7ee; flex: 0 0 auto;
+}
+.tb-left { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.tb-title { font-weight: 700; font-size: 16px; white-space: nowrap; }
+.tb-file { font-size: 12px; color: #8a93a0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-right { display: flex; gap: 6px; }
+.icon-btn {
+  min-width: 44px; min-height: 44px; border-radius: 10px; font-size: 20px;
+  background: #f1f4f8; color: #3a4553; display: inline-flex; align-items: center; justify-content: center;
+}
+.icon-btn:disabled { opacity: .35; }
+.icon-btn.small { min-width: 38px; min-height: 38px; font-size: 14px; border-radius: 9px; }
+.icon-btn:active { background: #e2e8f0; }
+
+/* 搜索框：固定在顶部显眼位置 */
+#searchBar {
+  display: flex; align-items: center; gap: 6px; background: #fff;
+  padding: 6px 10px; border-bottom: 1px solid #e3e7ee; flex: 0 0 auto;
+}
+#searchInput {
+  flex: 1; min-width: 0; height: 40px; border-radius: 10px; border: 1.5px solid #d8dee8;
+  background: #f6f8fb; padding: 0 12px; outline: none; font-size: 16px;
+}
+#searchInput:focus { border-color: #2f6bff; background: #fff; }
+#searchCount { font-size: 12px; color: #2f6bff; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* 工具栏 */
+#toolbar {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 8px; background: #fff;
+  border-bottom: 1px solid #e3e7ee; flex: 0 0 auto;
+}
+.tbtn {
+  flex: 1 1 22%; min-height: 40px; border-radius: 10px; font-size: 13.5px;
+  background: #f1f4f8; color: #3a4553; white-space: nowrap; padding: 0 6px;
+}
+.tbtn:active { background: #e2e8f0; }
+.tbtn.active { background: #dbe7ff; color: #2f6bff; font-weight: 600; }
+.tbtn.primary { background: #2f6bff; color: #fff; font-weight: 600; }
+.tbtn.warn { color: #d64545; }
+
+/* 范围模式提示条 */
+#rangeBanner {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: #e8f1ff; color: #2f6bff; font-size: 13px; border-bottom: 1px solid #cfe0ff;
+}
+#rangeBanner span { flex: 1; }
+#rangeBanner button { color: #2f6bff; font-weight: 600; min-height: 32px; padding: 0 10px; }
+
+/* ==================== 表格区域（虚拟滚动） ==================== */
+#gridArea { flex: 1; position: relative; min-height: 0; background: #fff; }
+#gridScroll {
+  position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+#gridScroll::-webkit-scrollbar { width: 0; height: 0; }
+#spacer { position: relative; }
+#cellWindow { position: sticky; top: 0; left: 0; overflow: hidden; }
+.cell {
+  position: absolute; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: 13px; padding: 0 4px; display: flex; align-items: center; gap: 4px;
+  border-right: 1px solid #edf0f4; border-bottom: 1px solid #edf0f4;
+  background: #fff; color: #1c2430;
+}
+.cell.hl-match { background: #fff3bf; }                 /* 搜索匹配高亮 */
+.cell.hl-cur   { background: #ffc966; }                 /* 当前搜索结果 */
+.cell.flash    { box-shadow: inset 0 0 0 2px #2f6bff; } /* 跳转定位闪烁 */
+.cell-img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; margin: auto; pointer-events: none; }
+.img-count {
+  position: absolute; right: 2px; bottom: 1px; background: rgba(47,107,255,.85); color: #fff;
+  font-size: 9px; padding: 1px 4px; border-radius: 6px; pointer-events: none;
+}
+/* 复选框控件 */
+.cb {
+  width: 22px; height: 22px; border-radius: 6px; border: 2px solid #9aa4b2; background: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 14px; color: transparent;
+  flex: 0 0 auto; font-weight: 700;
+}
+.cb.on { background: #2f6bff; border-color: #2f6bff; color: #fff; }
+
+/* 表头 */
+#hdrTop { position: absolute; top: 0; left: 44px; right: 0; height: 34px; overflow: hidden; background: #f4f6f9; z-index: 20; border-bottom: 1px solid #d5dae2; }
+#hdrTopInner { position: relative; height: 34px; }
+.hcell {
+  position: absolute; height: 34px; border-right: 1px solid #d5dae2; background: #f4f6f9;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; color: #5b6572;
+  overflow: hidden;
+}
+#hdrLeft { position: absolute; top: 34px; left: 0; bottom: 0; width: 44px; overflow: hidden; background: #f4f6f9; z-index: 20; border-right: 1px solid #d5dae2; }
+#hdrLeftInner { position: relative; width: 44px; }
+.rcell {
+  position: absolute; width: 44px; border-bottom: 1px solid #d5dae2; background: #f4f6f9;
+  display: flex; align-items: center; justify-content: center; font-size: 12px; color: #5b6572;
+  overflow: hidden;
+}
+#hdrCorner {
+  position: absolute; top: 0; left: 0; width: 44px; height: 34px; z-index: 30;
+  background: #f4f6f9; border-right: 1px solid #d5dae2; border-bottom: 1px solid #d5dae2;
+  display: flex; align-items: center; justify-content: center; color: #8a93a0; font-size: 13px; font-weight: 700;
+}
+/* 选中框 / 范围框 */
+#selBox, #rangeBox { position: absolute; z-index: 15; pointer-events: none; display: none; }
+#selBox   { border: 2px solid #2f6bff; background: rgba(47,107,255,.07); }
+#rangeBox { border: 2px solid #0ea5e9; background: rgba(14,165,233,.10); }
+
+/* 工作表标签栏 */
+#sheetTabs {
+  display: flex; gap: 6px; overflow-x: auto; background: #fff; border-top: 1px solid #e3e7ee;
+  padding: 6px 8px; padding-bottom: calc(6px + env(safe-area-inset-bottom)); flex: 0 0 auto;
+}
+#sheetTabs::-webkit-scrollbar { height: 0; }
+.stab {
+  flex: 0 0 auto; min-height: 34px; padding: 0 14px; border-radius: 8px;
+  background: #f1f4f8; color: #5b6572; font-size: 13px; max-width: 160px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stab.on { background: #2f6bff; color: #fff; font-weight: 600; }
+
+/* ==================== 底部编辑面板 ==================== */
+#panelMask {
+  position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 200;
+  display: flex; align-items: flex-end;
+}
+#panel {
+  width: 100%; background: #fff; border-radius: 18px 18px 0 0;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+  max-height: 72vh; overflow-y: auto;
+  animation: slideUp .22s ease;
+}
+@keyframes slideUp { from { transform: translateY(40px); opacity: .5; } to { transform: none; opacity: 1; } }
+.panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.panel-title { font-size: 16px; font-weight: 700; }
+.panel-sub { font-size: 13px; color: #5b6572; margin-bottom: 10px; word-break: break-all; }
+.panel-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.panel-tip { font-size: 12px; color: #98a1ad; line-height: 1.6; margin-top: 4px; }
+#pInput, #pRangeInput {
+  width: 100%; border: 1.5px solid #d8dee8; border-radius: 10px; background: #f6f8fb;
+  padding: 10px 12px; outline: none; resize: vertical; font-size: 16px;
+}
+#pInput:focus, #pRangeInput:focus { border-color: #2f6bff; background: #fff; }
+#pRangeInput { flex: 1; min-width: 0; }
+.pbtn {
+  flex: 1; min-height: 44px; border-radius: 10px; font-size: 14.5px;
+  background: #f1f4f8; color: #3a4553;
+}
+.pbtn:active { background: #e2e8f0; }
+.pbtn.primary { background: #2f6bff; color: #fff; font-weight: 600; }
+.pbtn.warn { color: #d64545; }
+.help-body { font-size: 13.5px; line-height: 1.75; color: #3a4553; }
+.help-body h3 { font-size: 14.5px; margin: 14px 0 4px; color: #1c2430; }
+.help-body ol, .help-body ul { margin: 4px 0; padding-left: 20px; }
+
+/* ==================== 对话框 / 提示 ==================== */
+#modalMask {
+  position: fixed; inset: 0; background: rgba(15,23,42,.5); z-index: 300;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+#modal {
+  width: 100%; max-width: 340px; background: #fff; border-radius: 16px;
+  padding: 20px 18px; animation: pop .18s ease;
+}
+@keyframes pop { from { transform: scale(.92); opacity: .5; } to { transform: none; opacity: 1; } }
+#modalTitle { font-size: 16.5px; font-weight: 700; margin-bottom: 8px; }
+#modalMsg { font-size: 14px; color: #3a4553; line-height: 1.65; white-space: pre-line; word-break: break-all; }
+#modalBtns { display: flex; gap: 10px; margin-top: 18px; }
+.mbtn {
+  flex: 1; min-height: 44px; border-radius: 10px; font-size: 15px;
+  background: #f1f4f8; color: #3a4553;
+}
+.mbtn.primary { background: #2f6bff; color: #fff; font-weight: 600; }
+.mbtn.danger { background: #d64545; color: #fff; font-weight: 600; }
+
+#toast {
+  position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 400;
+  transform: translateX(-50%); background: rgba(20,28,40,.88); color: #fff;
+  padding: 10px 18px; border-radius: 20px; font-size: 13.5px; max-width: 84vw;
+  opacity: 0; pointer-events: none; transition: opacity .25s; text-align: center;
+}
+#toast.show { opacity: 1; }
+
+#loading {
+  position: fixed; inset: 0; z-index: 500; background: rgba(255,255,255,.72);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+}
+.spinner {
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 4px solid #d8dee8; border-top-color: #2f6bff; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#loadingText { font-size: 14px; color: #3a4553; }
+
+/* ==================== 首页（文件库） ==================== */
+#homeScreen { height: 100%; display: flex; flex-direction: column; background: #eef1f5; }
+.home-head {
+  padding: calc(18px + env(safe-area-inset-top)) 16px 12px; background: #fff;
+  border-bottom: 1px solid #e4e8ee;
+}
+.home-head h1 { margin: 0; font-size: 20px; }
+.home-head p { margin: 4px 0 0; font-size: 12.5px; color: #8a94a3; }
+.home-head .home-tip { margin-top: 8px; font-size: 12px; color: #2f6bff; background: #eef3ff; border-radius: 8px; padding: 6px 10px; }
+#fileList { flex: 1; overflow-y: auto; padding: 12px; -webkit-overflow-scrolling: touch; }
+.file-item {
+  background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(28,42,70,.06); position: relative;
+}
+.file-item .fi-name { font-size: 15.5px; font-weight: 600; padding-right: 56px; word-break: break-all; }
+.file-item .fi-meta { font-size: 12px; color: #8a94a3; margin-top: 5px; }
+.file-item .fi-actions { display: flex; gap: 8px; margin-top: 10px; }
+.file-item .fi-btn {
+  flex: 1; min-height: 38px; border: none; border-radius: 9px; font-size: 14px;
+  background: #eef3ff; color: #2f6bff; font-weight: 600;
+}
+.file-item .fi-btn.del { background: #fdeeee; color: #d64545; }
+.file-item .fi-del {
+  position: absolute; right: 12px; top: 12px; width: 32px; height: 32px; border: none;
+  border-radius: 50%; background: #f1f4f8; color: #b0b8c4; font-size: 15px;
+}
+.home-empty { text-align: center; color: #8a94a3; padding: 56px 24px; font-size: 14px; line-height: 1.9; }
+#btnAddFile {
+  position: fixed; right: 18px; bottom: calc(22px + env(safe-area-inset-bottom)); z-index: 50;
+  min-height: 50px; padding: 0 22px; border: none; border-radius: 26px;
+  background: #2f6bff; color: #fff; font-size: 15.5px; font-weight: 600;
+  box-shadow: 0 4px 14px rgba(47,107,255,.35);
+}
+
+/* ==================== 盘点模式 ==================== */
+#invScreen { height: 100%; display: flex; flex-direction: column; background: #eef1f5; }
+.inv-top {
+  padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: #fff;
+  border-bottom: 1px solid #e4e8ee; display: flex; align-items: center; gap: 8px;
+}
+.inv-top .tb-title { flex: 1; min-width: 0; }
+.inv-top .tb-title b { display: block; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-top .tb-title span { font-size: 11.5px; color: #8a94a3; }
+/* 搜索区：字段选择 + 自动补全 */
+.inv-search { padding: 10px 12px; background: #fff; border-bottom: 1px solid #e4e8ee; position: relative; z-index: 30; }
+.inv-search .is-row { display: flex; gap: 6px; }
+.inv-search select {
+  flex: 0 0 108px; min-height: 40px; border: 1px solid #d8dee8; border-radius: 9px;
+  font-size: 13.5px; padding: 0 6px; background: #f7f9fc; color: #1c2430;
+}
+.inv-search input {
+  flex: 1; min-width: 0; min-height: 40px; border: 1px solid #d8dee8; border-radius: 9px;
+  font-size: 15px; padding: 0 12px; background: #fff;
+}
+#invSuggest {
+  position: absolute; left: 132px; right: 12px; top: 56px; z-index: 40;
+  background: #fff; border-radius: 10px; box-shadow: 0 6px 24px rgba(20,30,50,.18);
+  max-height: 46vh; overflow-y: auto; display: none;
+}
+#invSuggest .sg-item { padding: 11px 14px; font-size: 14.5px; border-bottom: 1px solid #f0f2f6; }
+#invSuggest .sg-item:last-child { border-bottom: none; }
+#invSuggest .sg-item.hl { background: #eef3ff; color: #2f6bff; }
+/* 资产行卡片列表 */
+#invList { flex: 1; overflow-y: auto; padding: 12px; -webkit-overflow-scrolling: touch; }
+.inv-card {
+  background: #fff; border-radius: 12px; padding: 12px 14px; margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(28,42,70,.06);
+}
+.inv-card.on { outline: 2px solid #2f6bff; }
+.inv-card .ic-line1 { display: flex; align-items: center; gap: 8px; }
+.inv-card .ic-no { font-weight: 700; font-size: 15px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-card .ic-badge { flex: 0 0 auto; font-size: 11px; padding: 3px 8px; border-radius: 10px; }
+.ic-badge.todo { background: #fff3e0; color: #e08600; }
+.ic-badge.done { background: #e6f7ec; color: #17a05e; }
+.inv-card .ic-name { font-size: 13px; color: #5a6472; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inv-card .ic-fields { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.inv-card .ic-chip {
+  font-size: 11.5px; padding: 3px 8px; border-radius: 8px; background: #f1f4f8; color: #5a6472;
+  max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.inv-card .ic-chip.filled { background: #e6f7ec; color: #17a05e; }
+.inv-card .ic-chip.photo { background: #eef3ff; color: #2f6bff; }
+
+/* ==================== 填写页（盘点单行） ==================== */
+#fillMask {
+  position: fixed; inset: 0; z-index: 300; background: #eef1f5; display: flex; flex-direction: column;
+}
+#fillMask .fm-top {
+  padding: calc(10px + env(safe-area-inset-top)) 12px 10px; background: #fff;
+  display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #e4e8ee;
+}
+#fillMask .fm-top .tb-title { flex: 1; min-width: 0; }
+#fillMask .fm-top .tb-title b { display: block; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#fillMask .fm-top .tb-title span { font-size: 11.5px; color: #8a94a3; }
+#fillBody { flex: 1; overflow-y: auto; padding: 12px; -webkit-overflow-scrolling: touch; padding-bottom: 90px; }
+.fill-sec { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(28,42,70,.06); }
+.fill-sec .fs-label { font-size: 14.5px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.fill-sec .fs-label .req { color: #e5484d; font-size: 12px; font-weight: 400; }
+.fill-sec .fs-cur { font-size: 13px; color: #8a94a3; margin-bottom: 8px; word-break: break-all; }
+.fill-sec .fs-info { font-size: 12px; color: #8a94a3; margin-top: 8px; line-height: 1.6; }
+.fill-sec input[type=text], .fill-sec textarea {
+  width: 100%; min-height: 42px; border: 1px solid #d8dee8; border-radius: 9px;
+  font-size: 15px; padding: 9px 12px; background: #fff; resize: vertical;
+}
+.fs-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.fs-opts .opt-btn {
+  min-height: 42px; padding: 0 20px; border: 1.5px solid #c9d4ff; border-radius: 21px;
+  background: #eef3ff; color: #2f6bff; font-size: 15px; font-weight: 600;
+}
+.fs-opts .opt-btn.on { background: #2f6bff; color: #fff; border-color: #2f6bff; }
+.fill-sec .fs-label .q-done {
+  font-size: 11px; font-weight: 600; color: #17a05e; background: #e6f7ec;
+  padding: 2px 8px; border-radius: 9px; margin-left: 2px;
+}
+.fs-photos { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.fs-photos .ph-wrap { position: relative; width: 76px; height: 76px; }
+.fs-photos img { width: 76px; height: 76px; object-fit: cover; border-radius: 8px; display: block; }
+.fs-photos .ph-del {
+  position: absolute; right: -6px; top: -6px; width: 22px; height: 22px; border: none;
+  border-radius: 50%; background: #d64545; color: #fff; font-size: 12px; line-height: 22px;
+}
+.ph-btn {
+  min-height: 38px; padding: 0 16px; border: 1px dashed #b9c6ff; border-radius: 10px;
+  background: #f4f7ff; color: #2f6bff; font-size: 14px;
+}
+.fm-nav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 310; background: #fff;
+  border-top: 1px solid #e4e8ee; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  display: flex; gap: 8px;
+}
+.fm-nav button { flex: 1; min-height: 46px; border: none; border-radius: 12px; font-size: 15px; }
+.fm-nav .nav-prev, .fm-nav .nav-next { background: #f1f4f8; color: #3a4553; font-size: 19px; flex: 0 0 52px; }
+.fm-nav .nav-save { background: #2f6bff; color: #fff; font-weight: 700; }
+.ver-badge {
+  display: inline-block; font-size: 11px; font-weight: 700; color: #2f6bff;
+  background: #eef3ff; border-radius: 8px; padding: 1px 8px; vertical-align: middle;
+}
+</style>
+</head>
+<body>
+
+<!-- ==================== 首页（文件库：添加/删除/打开） ==================== -->
+<div id="homeScreen">
+  <div class="home-head">
+    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.7</span></h1>
+    <p>已保存的表格都在这里，可随时打开继续填写</p>
+    <p class="home-tip">💡 小技巧：浏览器菜单里点「添加到桌面」，以后像 App 一样一点就开</p>
+  </div>
+  <div id="fileList"></div>
+  <button id="btnAddFile">＋ 添加 Excel</button>
+</div>
+
+<!-- ==================== 上传/导入页 ==================== -->
+<div id="uploadScreen" hidden>
+  <div class="up-card">
+    <div class="up-icon">📊</div>
+    <h1>正在导入 Excel</h1>
+    <p class="up-desc">导入后：自动识别红色表头列为「待填写项」<br>按表头字段搜索定位 → 选选项/打字/拍照 → 保存</p>
+    <button id="btnPickFile" class="btn-primary big">选择 Excel 文件</button>
+    <button id="btnHelp" class="btn-plain">📖 使用说明</button>
+    <p class="up-note">🔒 所有编辑均在内存副本中进行，<br>绝不修改、覆盖您的原文件</p>
+  </div>
+</div>
+
+<!-- ==================== 主界面 ==================== -->
+<div id="mainScreen" hidden>
+  <header id="topbar">
+    <div class="tb-left">
+      <button id="btnHome" class="icon-btn" title="返回首页">⌂</button>
+      <span class="tb-title">📊 轻表</span>
+      <span id="fileName" class="tb-file"></span>
+    </div>
+    <div class="tb-right">
+      <button id="btnInvMode" class="tbtn small" title="盘点模式">📋 盘点</button>
+      <button id="btnUndo" class="icon-btn" title="撤销">↶</button>
+      <button id="btnRedo" class="icon-btn" title="重做">↷</button>
+      <button id="btnHelpTop" class="icon-btn" title="帮助">?</button>
+    </div>
+  </header>
+
+  <!-- 搜索框（固定顶部） -->
+  <div id="searchBar">
+    <input id="searchInput" type="search" placeholder="🔍 搜索全部工作表…" autocomplete="off" enterkeyhint="search">
+    <span id="searchCount" hidden>0</span>
+    <button id="btnPrev" class="icon-btn small" title="上一个结果" hidden>▲</button>
+    <button id="btnNext" class="icon-btn small" title="下一个结果" hidden>▼</button>
+    <button id="btnCloseSearch" class="icon-btn small" title="关闭搜索" hidden>✕</button>
+  </div>
+
+  <!-- 工具栏 -->
+  <nav id="toolbar">
+    <button id="btnRangeMode" class="tbtn">⊞ 选范围</button>
+    <button id="btnFill" class="tbtn">✏️ 填充</button>
+    <button id="btnImage" class="tbtn">🖼 插图</button>
+    <button id="btnCheckbox" class="tbtn">☑️ 复选框</button>
+    <button id="btnClear" class="tbtn warn">🗑 清除</button>
+    <button id="btnExport" class="tbtn primary">⬇ 导出</button>
+  </nav>
+
+  <div id="rangeBanner" hidden><span id="rangeBannerText"></span><button id="btnRangeCancel">取消</button></div>
+
+  <!-- 表格 -->
+  <main id="gridArea">
+    <div id="gridScroll">
+      <div id="spacer">
+        <div id="cellWindow"></div>
+      </div>
+    </div>
+    <div id="hdrTop"><div id="hdrTopInner"></div></div>
+    <div id="hdrLeft"><div id="hdrLeftInner"></div></div>
+    <div id="hdrCorner">#</div>
+    <div id="selBox"></div>
+    <div id="rangeBox"></div>
+  </main>
+
+  <!-- 工作表标签 -->
+  <nav id="sheetTabs"></nav>
+</div>
+
+<!-- ==================== 盘点模式 ==================== -->
+<div id="invScreen" hidden>
+  <div class="inv-top">
+    <button id="btnInvBack" class="icon-btn" title="返回表格">⌂</button>
+    <div class="tb-title"><b id="invTitle">盘点</b><span id="invSub"></span></div>
+    <button id="btnInvTable" class="tbtn small">▦ 表格</button>
+    <button id="btnInvShare" class="tbtn primary small">⬇ 保存分享</button>
+  </div>
+  <div class="inv-search">
+    <div class="is-row">
+      <select id="invFieldSel"></select>
+      <input id="invSearchInput" type="text" placeholder="输入搜索，自动跳出匹配选项…" autocomplete="off" autocapitalize="off">
+    </div>
+    <div id="invSuggest"></div>
+  </div>
+  <div id="invList"></div>
+</div>
+
+<!-- ==================== 填写页（盘点单行） ==================== -->
+<div id="fillMask" hidden>
+  <div class="fm-top">
+    <button id="btnFillBack" class="icon-btn" title="返回列表">←</button>
+    <div class="tb-title"><b id="fillTitle">填写</b><span id="fillSub"></span></div>
+  </div>
+  <div id="fillBody"></div>
+  <div class="fm-nav">
+    <button id="btnFillPrev" class="nav-prev">‹</button>
+    <button id="btnFillNext" class="nav-next">›</button>
+    <button id="btnFillSave" class="nav-save">保存并返回列表</button>
+  </div>
+</div>
+
+<!-- ==================== 底部编辑面板 ==================== -->
+<div id="panelMask" hidden><div id="panel"></div></div>
+
+<!-- ==================== 对话框 ==================== -->
+<div id="modalMask" hidden>
+  <div id="modal">
+    <div id="modalTitle"></div>
+    <div id="modalMsg"></div>
+    <div id="modalBtns"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<div id="loading" hidden><div class="spinner"></div><div id="loadingText"></div></div>
+
+<input type="file" id="fileXlsx" accept=".xlsx,.xls" hidden>
+<input type="file" id="fileImg" accept="image/*" hidden>
+<input type="file" id="filePhoto" accept="image/*" capture="environment" hidden>
+
+<!-- 组件库（CDN，带国内镜像回退）：
+     XLSX 优先官方 cdn.sheetjs.com（0.20.3），失败时回退 npmmirror 镜像（0.18.5，社区版，功能一致）；
+     JSZip 优先 cdnjs，失败时回退 bootcdn。 -->
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script>window.XLSX || document.write('<script src="https://registry.npmmirror.com/xlsx/0.18.5/files/dist/xlsx.full.min.js"><\/script>');</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>window.JSZip || document.write('<script src="https://cdn.bootcdn.net/ajax/libs/jszip/3.10.1/jszip.min.js"><\/script>');</script>
+
+<script>
+'use strict';
+/* ================================================================
+ * 一、常量与全局状态
+ * ================================================================ */
+var ROW_HDR_W = 44;            // 行号列宽（px）
+var COL_HDR_H = 34;            // 列标题行高（px）
+var DEF_COL_W = 92;            // 默认列宽
+var DEF_ROW_H = 34;            // 默认行高（手机触控友好）
+var MIN_COL_W = 48, MAX_COL_W = 320;
+var MIN_ROW_H = 28, MAX_ROW_H = 160;
+var MAX_UNDO = 100;            // 最多保留撤销步数
+var MAX_SEARCH_RESULTS = 3000; // 搜索结果上限
+var MAX_RANGE_CELLS = 100000;  // 批量操作单元格上限（安全保护）
+var MAX_SPACER_PX = 3e7;       // 滚动画布最大尺寸（浏览器限制保护）
+
+var state = {
+  wb: null,                    // SheetJS 工作簿（内存工作副本，原文件永不写入）
+  fileName: '',                // 原始文件名
+  fileId: null,                // 文件库（IndexedDB）中的记录 id，null=尚未保存
+  sheetNames: [],
+  activeSheet: '',
+  checkboxSets: {},            // { sheetName: Set("A1", ...) } 复选框单元格集合
+  images: {},                  // { sheetName: { addr: [{dataUrl, ext, w, h, name}, ...] } } 图片数据（多张并存）
+  undoStack: [], redoStack: [],// 撤销/重做栈：{label, undo:fn, redo:fn}
+  sel: { r: -1, c: -1 },       // 当前选中单元格
+  range: null,                 // 已选范围 {r1,c1,r2,c2}（已归一化）
+  rangePick: null,             // 范围模式第一锚点
+  rangeMode: false,            // 是否处于"点选范围"模式
+  pickForImage: false,         // 是否处于"点选单元格插图"模式
+  flashKey: null, flashTimer: null, // 定位闪烁
+  pendingPhotoAddr: null,      // 盘点拍照目标地址
+  inv: null,                   // 盘点状态 {sheet, headerRow, cols:[{c,header,isPhoto}], photoCols, rows, cur}
+  search: { active: false, term: '', results: [], index: -1, matchSet: {}, curKey: null }
+};
+
+var layoutCache = new Map();   // sheetName -> 布局数据（列宽/行高/偏移等）
+var cellEls = new Map();       // "r,c" -> {el, sig} 单元格 DOM 复用池
+var panelActions = {};         // 当前面板的按钮回调表
+var rafPending = false;
+
+function $(id) { return document.getElementById(id); }
+
+/* ================================================================
+ * 二、通用工具函数
+ * ================================================================ */
+/** HTML 转义（防注入） */
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+/** 属性值转义 */
+function escAttr(s) { return escHtml(s).replace(/'/g, '&#39;'); }
+/** 列序号(0开始) -> 列名，如 0->A, 27->AB */
+function colName(c) {
+  var s = '', n = c + 1;
+  while (n > 0) { var rem = (n - 1) % 26; s = String.fromCharCode(65 + rem) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+/** 列名 -> 列序号(0开始) */
+function colIdx(s) { var c = 0; for (var i = 0; i < s.length; i++) c = c * 26 + (s.charCodeAt(i) - 64); return c - 1; }
+/** 地址 "A1" -> {r, c}（0 基） */
+function addrToRC(addr) {
+  var m = /^\$?([A-Z]+)\$?(\d+)$/.exec(addr);
+  if (!m) return null;
+  return { r: parseInt(m[2], 10) - 1, c: colIdx(m[1]) };
+}
+/** {r,c} -> 地址 "A1" */
+function rcToAddr(r, c) { return colName(c) + (r + 1); }
+/** 归一化范围（保证 r1<=r2, c1<=c2） */
+function norm(r1, c1, r2, c2) {
+  return { r1: Math.min(r1, r2), c1: Math.min(c1, c2), r2: Math.max(r1, r2), c2: Math.max(c1, c2) };
+}
+/** 范围单元格数量 */
+function rangeCount(rg) { return (rg.r2 - rg.r1 + 1) * (rg.c2 - rg.c1 + 1); }
+/** 范围 -> 地址数组（带上限保护） */
+function rangeAddrs(rg) {
+  var out = [];
+  for (var r = rg.r1; r <= rg.r2; r++)
+    for (var c = rg.c1; c <= rg.c2; c++) { out.push(rcToAddr(r, c)); if (out.length > MAX_RANGE_CELLS) break; }
+  return out;
+}
+/** 解析用户输入的范围文本：A1:C10 / 3:5(行) / C:F(列) / C(列) / 5(行) */
+function parseRangeText(t, nR, nC) {
+  t = String(t || '').trim().toUpperCase().replace(/\$/g, '');
+  var m;
+  if ((m = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(t)))
+    return norm(parseInt(m[2], 10) - 1, colIdx(m[1]), parseInt(m[4], 10) - 1, colIdx(m[3]));
+  if ((m = /^(\d+):(\d+)$/.exec(t)))   return norm(parseInt(m[1], 10) - 1, 0, parseInt(m[2], 10) - 1, Math.min(nC - 1, 16383));
+  if ((m = /^([A-Z]+):([A-Z]+)$/.exec(t))) return norm(0, colIdx(m[1]), Math.min(nR - 1, 1048575), colIdx(m[2]));
+  if ((m = /^([A-Z]+)$/.exec(t)))     { var c = colIdx(m[1]); return norm(0, c, Math.min(nR - 1, 1048575), c); }
+  if ((m = /^(\d+)$/.exec(t)))        { var r = parseInt(m[1], 10) - 1; return norm(r, 0, r, Math.min(nC - 1, 16383)); }
+  return null;
+}
+/** dataURL -> Uint8Array（导出注入图片时用） */
+function dataUrlToU8(dataUrl) {
+  var b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  var bin = atob(b64), u8 = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+/** Uint8Array -> base64（读取原文件图片时用） */
+function u8ToB64(u8) {
+  var s = '';
+  for (var i = 0; i < u8.length; i += 0x8000)
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+/** 触发浏览器下载 */
+function downloadBlob(blob, name) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 4000);
+}
+/** 导出文件名：保持原始文件名不变（用户要求），没有扩展名时才补 .xlsx */
+function exportName() {
+  var n = state.fileName || '工作簿.xlsx';
+  return /\.(xlsx|xls)$/i.test(n) ? n : n + '.xlsx';
+}
+
+/* ================================================================
+ * 三、布局计算（列宽/行高/偏移/合并单元格）
+ * ================================================================ */
+function getLayout(name) { return layoutCache.get(name) || buildLayout(name); }
+function invalidateLayout(name) { layoutCache.delete(name); }
+
+function buildLayout(name) {
+  var ws = state.wb.Sheets[name];
+  var ref = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+  var maxR = ref.e.r, maxC = ref.e.c;
+  // 复选框/图片可能位于使用范围之外，一并纳入布局
+  var cbSet = state.checkboxSets[name];
+  if (cbSet) cbSet.forEach(function (a) { var p = addrToRC(a); if (p) { maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c); } });
+  var imgs = state.images[name];
+  if (imgs) Object.keys(imgs).forEach(function (a) { var p = addrToRC(a); if (p) { maxR = Math.max(maxR, p.r); maxC = Math.max(maxC, p.c); } });
+  // 右侧/下方预留空白区域，方便继续录入
+  maxR = Math.min(maxR + 80, 1048575);
+  maxC = Math.min(maxC + 8, 16383);
+
+  // 列（跳过隐藏列；宽度来自 !cols.wch）
+  var cols = [], off = 0;
+  for (var c = 0; c <= maxC; c++) {
+    var cd = ws['!cols'] && ws['!cols'][c];
+    if (cd && cd.hidden) continue;
+    var w = DEF_COL_W;
+    if (cd && cd.wch) w = Math.max(MIN_COL_W, Math.min(MAX_COL_W, Math.round(cd.wch * 7.6)));
+    cols.push({ c: c, w: w, off: off }); off += w;
+  }
+  // 行（跳过隐藏行；高度来自 !rows.hpt）
+  var rows = [], offR = 0;
+  for (var r = 0; r <= maxR; r++) {
+    var rd = ws['!rows'] && ws['!rows'][r];
+    if (rd && rd.hidden) continue;
+    var h = DEF_ROW_H;
+    if (rd && rd.hpt) h = Math.max(MIN_ROW_H, Math.min(MAX_ROW_H, Math.round(rd.hpt * 96 / 72)));
+    rows.push({ r: r, h: h, off: offR }); offR += h;
+  }
+  // 合并单元格：被覆盖的任意单元格 -> 合并信息
+  var mergeAnchor = new Map();
+  (ws['!merges'] || []).forEach(function (m) {
+    for (var rr = m.s.r; rr <= m.e.r; rr++)
+      for (var cc = m.s.c; cc <= m.e.c; cc++) mergeAnchor.set(rr + ',' + cc, m);
+  });
+  var lay = {
+    name: name, ws: ws, maxR: maxR, maxC: maxC,
+    cols: cols, rows: rows,
+    colPos: new Map(), rowPos: new Map(),
+    totalW: Math.min(off, MAX_SPACER_PX), totalH: Math.min(offR, MAX_SPACER_PX),
+    mergeAnchor: mergeAnchor
+  };
+  cols.forEach(function (e) { lay.colPos.set(e.c, e); });
+  rows.forEach(function (e) { lay.rowPos.set(e.r, e); });
+  layoutCache.set(name, lay);
+  return lay;
+}
+
+/** 二分：返回第一个 off > x 的下标 */
+function lowerBound(list, x) {
+  var lo = 0, hi = list.length;
+  while (lo < hi) { var mid = (lo + hi) >> 1; if (list[mid].off <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+/** 与 [x0, x1] 重叠的列表下标区间 [起, 止) */
+function rangeFor(list, x0, x1) {
+  var i0 = Math.max(0, lowerBound(list, x0) - 1);
+  var i1 = Math.min(list.length, lowerBound(list, x1));
+  return [i0, Math.max(i0, i1)];
+}
+/** 合并单元格的宽/高 */
+function mergeW(lay, m) {
+  var w = 0;
+  for (var c = m.s.c; c <= m.e.c; c++) { var p = lay.colPos.get(c); if (p) w += p.w; }
+  return w || DEF_COL_W;
+}
+function mergeH(lay, m) {
+  var h = 0;
+  for (var r = m.s.r; r <= m.e.r; r++) { var p = lay.rowPos.get(r); if (p) h += p.h; }
+  return h || DEF_ROW_H;
+}
+
+/* ================================================================
+ * 四、表格渲染（虚拟滚动：只渲染可视区域单元格）
+ * ================================================================ */
+function createCellEl() {
+  var el = document.createElement('div');
+  el.className = 'cell';
+  $('cellWindow').appendChild(el);
+  return el;
+}
+/** 单元格样式签名（用于判断是否需要重新填充内容） */
+function cellStyleKey(cell) {
+  if (!cell || !cell.s) return '';
+  var s = cell.s, f = s.font || {}, fl = s.fill || {};
+  return [f.bold ? 1 : 0, f.italic ? 1 : 0, f.underline ? 1 : 0,
+    (fl.fgColor && fl.fgColor.rgb) || '', (f.color && f.color.rgb) || '', cell.t || ''].join('|');
+}
+/** 填充单元格内容与样式 */
+function fillCell(el, o) {
+  el.textContent = '';
+  if (o.isCb) { // 复选框单元格：渲染可交互的勾选框
+    var d = document.createElement('div');
+    d.className = 'cb' + (o.cbOn ? ' on' : '');
+    d.textContent = '✓';
+    el.appendChild(d);
+  } else if (o.img) { // 图片数组：显示第一张 + 张数角标
+    var im = document.createElement('img');
+    im.className = 'cell-img';
+    im.src = o.img[0].dataUrl;
+    el.appendChild(im);
+    if (o.img.length > 1) {
+      var bd = document.createElement('span');
+      bd.className = 'img-count';
+      bd.textContent = o.img.length + '张';
+      el.appendChild(bd);
+    }
+  } else if (o.txt !== '') {
+    el.textContent = o.txt;
+  }
+  // 基础格式（加粗/斜体/下划线/文字颜色/背景色）
+  if (o.cell && o.cell.s) {
+    var f = o.cell.s.font || {}, fl = o.cell.s.fill || {};
+    el.style.fontWeight = f.bold ? '700' : '400';
+    el.style.fontStyle = f.italic ? 'italic' : 'normal';
+    el.style.textDecoration = f.underline ? 'underline' : 'none';
+    el.style.color = (f.color && f.color.rgb) ? '#' + f.color.rgb.slice(-6) : '';
+    el.style.background = (fl.fgColor && fl.fgColor.rgb) ? '#' + fl.fgColor.rgb.slice(-6) : '';
+  } else {
+    el.style.fontWeight = ''; el.style.fontStyle = ''; el.style.textDecoration = '';
+    el.style.color = ''; el.style.background = '';
+  }
+  // 数值右对齐（与 Excel 一致）
+  el.style.textAlign = (o.cell && o.cell.t === 'n') ? 'right' : 'left';
+}
+
+function renderGrid() {
+  if (!state.wb || $('mainScreen').hidden) return;
+  var lay = getLayout(state.activeSheet);
+  var area = $('gridArea'), sc = $('gridScroll');
+  var vw = area.clientWidth, vh = area.clientHeight;
+  if (vw <= 0) return;
+  var sl = sc.scrollLeft, st = sc.scrollTop;
+
+  // 更新画布尺寸
+  $('spacer').style.width = (ROW_HDR_W + lay.totalW) + 'px';
+  $('spacer').style.height = (COL_HDR_H + lay.totalH) + 'px';
+  $('cellWindow').style.width = vw + 'px';
+  $('cellWindow').style.height = vh + 'px';
+
+  // 可视行列范围（含 2 行/列余量）
+  var x0 = sl - ROW_HDR_W, x1 = x0 + vw, y0 = st - COL_HDR_H, y1 = y0 + vh;
+  var cr = rangeFor(lay.cols, x0, x1), rr = rangeFor(lay.rows, y0, y1);
+  var ci0 = Math.max(0, cr[0] - 2), ci1 = Math.min(lay.cols.length, cr[1] + 2);
+  var ri0 = Math.max(0, rr[0] - 2), ri1 = Math.min(lay.rows.length, rr[1] + 2);
+
+  var mset = state.search.active ? (state.search.matchSet[state.activeSheet] || null) : null;
+  var cbSet = state.checkboxSets[state.activeSheet] || null;
+  var imgs = state.images[state.activeSheet] || null;
+  var ws = lay.ws;
+  var used = new Set();
+
+  for (var ri = ri0; ri < ri1; ri++) {
+    var rw = lay.rows[ri], r = rw.r;
+    for (var ci = ci0; ci < ci1; ci++) {
+      var cw = lay.cols[ci], c = cw.c;
+      var key = r + ',' + c;
+      var m = lay.mergeAnchor.get(key);
+      if (m && !(m.s.r === r && m.s.c === c)) continue; // 被合并覆盖的非锚点单元格不渲染
+      var w = m ? mergeW(lay, m) : cw.w, h = m ? mergeH(lay, m) : rw.h;
+      var addr = rcToAddr(r, c);
+      var cell = ws[addr];
+      var isCb = !!(cbSet && cbSet.has(addr));
+      var img = imgs ? imgs[addr] : null;
+      var txt = cell ? (cell.w != null ? String(cell.w) : (cell.v != null ? String(cell.v) : '')) : '';
+      var cbOn = isCb && cell && cell.v === true;
+      var sig = [txt, isCb, cbOn, img ? (img.length + '|' + img[0].dataUrl) : '', cellStyleKey(cell)].join('|');
+
+      var entry = cellEls.get(key);
+      if (!entry) {
+        var el = createCellEl();
+        el.dataset.key = key;
+        entry = { el: el, sig: null };
+        cellEls.set(key, entry);
+      }
+      if (entry.sig !== sig) {
+        fillCell(entry.el, { txt: txt, isCb: isCb, cbOn: cbOn, img: img, cell: cell });
+        entry.sig = sig;
+      }
+      entry.el.style.left = (ROW_HDR_W + cw.off - sl) + 'px';
+      entry.el.style.top = (COL_HDR_H + rw.off - st) + 'px';
+      entry.el.style.width = w + 'px';
+      entry.el.style.height = h + 'px';
+      var flash = state.flashKey === state.activeSheet + '|' + key;
+      entry.el.className = 'cell' +
+        (mset && mset.has(key) ? ' hl-match' : '') +
+        (state.search.active && state.search.curKey === state.activeSheet + '|' + key ? ' hl-cur' : '') +
+        (flash ? ' flash' : '');
+      used.add(key);
+    }
+  }
+  // 回收离开可视区的 DOM
+  cellEls.forEach(function (entry, key) {
+    if (!used.has(key)) { entry.el.remove(); cellEls.delete(key); }
+  });
+
+  renderHeaders(lay, ci0, ci1, ri0, ri1, sl, st);
+  renderSelBox(lay, sl, st);
+}
+
+function renderHeaders(lay, ci0, ci1, ri0, ri1, sl, st) {
+  var top = $('hdrTopInner');
+  top.innerHTML = '';
+  for (var ci = ci0; ci < ci1; ci++) {
+    var cw = lay.cols[ci];
+    var d = document.createElement('div');
+    d.className = 'hcell';
+    d.textContent = colName(cw.c);
+    d.dataset.c = cw.c;
+    d.style.left = cw.off + 'px';
+    d.style.width = cw.w + 'px';
+    top.appendChild(d);
+  }
+  top.style.width = lay.totalW + 'px';
+  top.style.transform = 'translateX(' + (-(sl - ROW_HDR_W)) + 'px)';
+
+  var left = $('hdrLeftInner');
+  left.innerHTML = '';
+  for (var ri = ri0; ri < ri1; ri++) {
+    var rw = lay.rows[ri];
+    var e = document.createElement('div');
+    e.className = 'rcell';
+    e.textContent = rw.r + 1;
+    e.dataset.r = rw.r;
+    e.style.top = rw.off + 'px';
+    e.style.height = rw.h + 'px';
+    left.appendChild(e);
+  }
+  left.style.height = lay.totalH + 'px';
+  left.style.transform = 'translateY(' + (-(st - COL_HDR_H)) + 'px)';
+}
+
+function renderSelBox(lay, sl, st) {
+  var sb = $('selBox'), rb = $('rangeBox');
+  // 单格选中框
+  if (state.sel.r >= 0 && !state.range && !state.rangePick) {
+    var p = lay.rowPos.get(state.sel.r), q = lay.colPos.get(state.sel.c);
+    if (p && q) {
+      sb.style.display = 'block';
+      sb.style.left = (ROW_HDR_W + q.off - sl) + 'px';
+      sb.style.top = (COL_HDR_H + p.off - st) + 'px';
+      sb.style.width = q.w + 'px';
+      sb.style.height = p.h + 'px';
+    } else sb.style.display = 'none';
+  } else sb.style.display = 'none';
+  // 范围框
+  var rg = state.range || state.rangePick;
+  if (rg) {
+    var r1 = Math.min(rg.r1, rg.r2), r2 = Math.max(rg.r1, rg.r2);
+    var c1 = Math.min(rg.c1, rg.c2), c2 = Math.max(rg.c1, rg.c2);
+    var p1 = lay.rowPos.get(r1), p2 = lay.rowPos.get(r2);
+    var q1 = lay.colPos.get(c1), q2 = lay.colPos.get(c2);
+    if (p1 && p2 && q1 && q2) {
+      rb.style.display = 'block';
+      rb.style.left = (ROW_HDR_W + q1.off - sl) + 'px';
+      rb.style.top = (COL_HDR_H + p1.off - st) + 'px';
+      rb.style.width = (q2.off + q2.w - q1.off) + 'px';
+      rb.style.height = (p2.off + p2.h - p1.off) + 'px';
+    } else rb.style.display = 'none';
+  } else rb.style.display = 'none';
+}
+
+/** 滚动事件（rAF 节流） */
+function scheduleRender() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(function () { rafPending = false; renderGrid(); });
+}
+
+/** 滚动定位到指定单元格并闪烁提示 */
+function goToCell(r, c) {
+  var lay = getLayout(state.activeSheet);
+  var cp = lay.colPos.get(c), rp = lay.rowPos.get(r);
+  var sc = $('gridScroll'), area = $('gridArea');
+  var x = cp ? cp.off + cp.w / 2 : 0, y = rp ? rp.off + rp.h / 2 : 0;
+  sc.scrollTo({ left: Math.max(0, x - area.clientWidth / 2 + ROW_HDR_W), top: Math.max(0, y - area.clientHeight / 2 + COL_HDR_H) });
+  state.sel = { r: r, c: c };
+  state.flashKey = state.activeSheet + '|' + r + ',' + c;
+  renderGrid();
+  clearTimeout(state.flashTimer);
+  state.flashTimer = setTimeout(function () { state.flashKey = null; renderGrid(); }, 1500);
+}
+
+/* ================================================================
+ * 五、撤销 / 重做（基于操作前后快照）
+ * ================================================================ */
+/** 单元格快照（含复选框成员资格），用于撤销恢复 */
+function snapCells(name, addrs) {
+  var ws = state.wb.Sheets[name];
+  var set = state.checkboxSets[name];
+  return addrs.map(function (a) {
+    var c = ws[a];
+    return {
+      a: a,
+      cell: c ? { t: c.t, v: c.v, w: c.w, s: c.s, z: c.z, f: c.f } : null,
+      cb: !!(set && set.has(a))
+    };
+  });
+}
+function restoreSnap(name, snaps) {
+  var ws = state.wb.Sheets[name];
+  var set = state.checkboxSets[name];
+  for (var i = 0; i < snaps.length; i++) {
+    var s = snaps[i];
+    if (s.cell) ws[s.a] = s.cell; else delete ws[s.a];
+    if (s.cb) { if (!set) state.checkboxSets[name] = set = new Set(); set.add(s.a); }
+    else if (set) set.delete(s.a);
+  }
+}
+function pushOp(label, undo, redo) {
+  state.undoStack.push({ label: label, undo: undo, redo: redo });
+  if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
+  state.redoStack.length = 0;
+  updateUndoButtons();
+}
+function afterOp(msg) {
+  invalidateLayout(state.activeSheet);
+  renderGrid();
+  updateUndoButtons();
+  toast(msg);
+  schedulePersist(); // 改动自动保存进文件库
+}
+function undo() {
+  var op = state.undoStack.pop();
+  if (!op) return;
+  op.undo();
+  state.redoStack.push(op);
+  afterOp('已撤销：' + op.label);
+}
+function redo() {
+  var op = state.redoStack.pop();
+  if (!op) return;
+  op.redo();
+  state.undoStack.push(op);
+  afterOp('已重做：' + op.label);
+}
+function updateUndoButtons() {
+  $('btnUndo').disabled = !state.undoStack.length;
+  $('btnRedo').disabled = !state.redoStack.length;
+}
+
+/* ================================================================
+ * 六、数据编辑操作（每个操作都记录撤销快照）
+ * ================================================================ */
+/** 扩大工作表引用范围，防止写入超出 !ref 的单元格在导出时丢失 */
+function extendRef(ws, r, c) {
+  var ref = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : { s: { r: 0, c: 0 }, e: { r: -1, c: -1 } };
+  if (r < ref.s.r) ref.s.r = r;
+  if (r > ref.e.r) ref.e.r = r;
+  if (c < ref.s.c) ref.s.c = c;
+  if (c > ref.e.c) ref.e.c = c;
+  ws['!ref'] = XLSX.utils.encode_range(ref);
+}
+function cbSetHas(name, addr) { var s = state.checkboxSets[name]; return !!(s && s.has(addr)); }
+function cbSetAdd(name, addr) { if (!state.checkboxSets[name]) state.checkboxSets[name] = new Set(); state.checkboxSets[name].add(addr); }
+function cbSetDelete(name, addr) { var s = state.checkboxSets[name]; if (s) s.delete(addr); }
+
+/** 写入文本（数字自动识别为数值类型），保留原样式/格式 */
+function applyTextCell(name, addr, text) {
+  var ws = state.wb.Sheets[name];
+  var p = addrToRC(addr);
+  extendRef(ws, p.r, p.c);
+  var old = ws[addr] || {};
+  var num = /^[+-]?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?$/.test(text) && text.length <= 15 ? Number(text) : null;
+  var nc = num !== null ? { t: 'n', v: num } : { t: 's', v: text };
+  nc.w = text;
+  if (old.s) nc.s = old.s;
+  if (old.z) nc.z = old.z;
+  ws[addr] = nc;
+  cbSetDelete(name, addr); // 文本会覆盖复选框状态，同步移除勾选标记
+}
+
+/** 保存单个单元格编辑 */
+function saveCellEdit(addr, v) {
+  var name = state.activeSheet;
+  if (v === '') { clearCells(name, [addr]); toast('已清空 ' + addr); return; }
+  var before = snapCells(name, [addr]);
+  applyTextCell(name, addr, v);
+  var after = snapCells(name, [addr]);
+  pushOp('编辑 ' + addr,
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp('已保存 ' + addr);
+}
+
+/** 批量填充范围 */
+function fillRangeText(name, rg, text) {
+  var ws = state.wb.Sheets[name];
+  var addrs = rangeAddrs(rg);
+  if (!addrs.length) return;
+  var before = snapCells(name, addrs);
+  for (var i = 0; i < addrs.length; i++) applyTextCell(name, addrs[i], text);
+  var after = snapCells(name, addrs);
+  pushOp('批量填充 ' + addrs.length + ' 个单元格',
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp('已填充 ' + addrs.length + ' 个单元格');
+}
+
+/** 清空单元格（值 + 复选框标记） */
+function clearCells(name, addrs) {
+  var ws = state.wb.Sheets[name];
+  var before = snapCells(name, addrs);
+  for (var i = 0; i < addrs.length; i++) { delete ws[addrs[i]]; cbSetDelete(name, addrs[i]); }
+  var after = snapCells(name, addrs);
+  pushOp('清空 ' + addrs.length + ' 个单元格',
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp('已清空 ' + addrs.length + ' 个单元格');
+}
+
+/** 添加复选框：单元格值改为布尔（已有 TRUE/FALSE 沿用），并登记到复选框集合 */
+function addCheckboxes(name, addrs) {
+  var ws = state.wb.Sheets[name];
+  var before = snapCells(name, addrs);
+  for (var i = 0; i < addrs.length; i++) {
+    var a = addrs[i], p = addrToRC(a);
+    extendRef(ws, p.r, p.c);
+    var cell = ws[a];
+    var v = !!(cell && cell.t === 'b' && cell.v);
+    ws[a] = { t: 'b', v: v, w: v ? 'TRUE' : 'FALSE' };
+    cbSetAdd(name, a);
+  }
+  var after = snapCells(name, addrs);
+  pushOp('添加复选框 ×' + addrs.length,
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp('已添加复选框，点击即可勾选/取消');
+}
+
+/** 移除复选框（保留单元格中的 TRUE/FALSE 值） */
+function removeCheckboxes(name, addrs) {
+  var before = snapCells(name, addrs);
+  for (var i = 0; i < addrs.length; i++) cbSetDelete(name, addrs[i]);
+  var after = snapCells(name, addrs);
+  pushOp('移除复选框 ×' + addrs.length,
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp('已移除复选框（TRUE/FALSE 值保留）');
+}
+
+/** 切换复选框勾选状态（点击表格中的勾选框触发） */
+function toggleCheckbox(name, addr) {
+  var ws = state.wb.Sheets[name];
+  var cur = !!(ws[addr] && ws[addr].t === 'b' && ws[addr].v);
+  var before = snapCells(name, [addr]);
+  var v = !cur;
+  ws[addr] = { t: 'b', v: v, w: v ? 'TRUE' : 'FALSE' };
+  var after = snapCells(name, [addr]);
+  pushOp((v ? '勾选 ' : '取消勾选 ') + addr,
+    function () { restoreSnap(name, before); },
+    function () { restoreSnap(name, after); });
+  afterOp(v ? '已勾选 ' + addr : '已取消勾选 ' + addr);
+}
+
+/** 追加图片到单元格（多张共存，不覆盖；每格存图片数组） */
+function setImage(name, addr, img) {
+  var ws = state.wb.Sheets[name];
+  var p = addrToRC(addr);
+  extendRef(ws, p.r, p.c);
+  if (!state.images[name]) state.images[name] = {};
+  if (!state.images[name][addr]) state.images[name][addr] = [];
+  var arr = state.images[name][addr];
+  var beforeLen = arr.length;
+  arr.push(img);
+  pushOp('插入图片 ' + addr + '（第 ' + (beforeLen + 1) + ' 张）',
+    function () { state.images[name][addr].length = beforeLen; if (!beforeLen) delete state.images[name][addr]; },
+    function () { if (!state.images[name][addr]) state.images[name][addr] = arr; state.images[name][addr].push(img); });
+  afterOp('图片已插入 ' + addr + '（共 ' + arr.length + ' 张）');
+}
+
+/** 删除单元格中第 idx 张图片 */
+function removeImage(name, addr, idx) {
+  var arr = state.images[name] && state.images[name][addr];
+  if (!arr || !arr[idx]) return;
+  var removed = arr.splice(idx, 1)[0];
+  pushOp('删除图片 ' + addr + '（第 ' + (idx + 1) + ' 张）',
+    function () { if (!state.images[name][addr]) state.images[name][addr] = arr; arr.splice(idx, 0, removed); },
+    function () { if (state.images[name][addr] !== arr) state.images[name][addr] = arr; arr.splice(idx, 1); if (!arr.length) delete state.images[name][addr]; });
+  if (!arr.length) delete state.images[name][addr];
+  afterOp('图片已删除 ' + addr);
+}
+
+/* ================================================================
+ * 七、搜索（全工作表全局搜索）
+ * ================================================================ */
+function doSearch(raw) {
+  var term = String(raw || '').trim();
+  if (!term) { clearSearch(); return; }
+  var q = term.toLowerCase();
+  var results = [], matchSet = {};
+  for (var i = 0; i < state.sheetNames.length; i++) {
+    var name = state.sheetNames[i];
+    var ws = state.wb.Sheets[name];
+    if (!ws || !ws['!ref']) continue;
+    var R = XLSX.utils.decode_range(ws['!ref']);
+    var set = new Set();
+    for (var r = R.s.r; r <= R.e.r; r++) {
+      for (var c = R.s.c; c <= R.e.c; c++) {
+        var cell = ws[rcToAddr(r, c)];
+        if (!cell) continue;
+        var txt = cell.w != null ? String(cell.w) : (cell.v != null ? String(cell.v) : '');
+        if (!txt) continue;
+        if (txt.toLowerCase().indexOf(q) >= 0) {
+          if (results.length < MAX_SEARCH_RESULTS) results.push({ name: name, r: r, c: c, txt: txt });
+          set.add(r + ',' + c);
+        }
+      }
+    }
+    matchSet[name] = set;
+  }
+  state.search = { active: true, term: term, results: results, index: -1, matchSet: matchSet, curKey: null };
+  updateSearchUI();
+  if (results.length) {
+    gotoResult(1);
+    if (results.length >= MAX_SEARCH_RESULTS) toast('结果过多，仅显示前 ' + MAX_SEARCH_RESULTS + ' 条');
+  } else {
+    renderGrid();
+    toast('未找到匹配内容');
+  }
+}
+function gotoResult(delta) {
+  var s = state.search;
+  if (!s.active || !s.results.length) return;
+  s.index = (s.index + delta + s.results.length) % s.results.length;
+  var it = s.results[s.index];
+  s.curKey = it.name + '|' + it.r + ',' + it.c;
+  if (state.activeSheet !== it.name) switchSheet(it.name);
+  goToCell(it.r, it.c);
+  updateSearchUI();
+}
+function clearSearch() {
+  state.search = { active: false, term: '', results: [], index: -1, matchSet: {}, curKey: null };
+  $('searchInput').value = '';
+  updateSearchUI();
+  renderGrid();
+}
+function updateSearchUI() {
+  var s = state.search;
+  $('searchCount').hidden = !s.active;
+  $('btnPrev').hidden = !s.active;
+  $('btnNext').hidden = !s.active;
+  $('btnCloseSearch').hidden = !s.active;
+  if (s.active) $('searchCount').textContent = s.results.length ? (s.index + 1) + '/' + s.results.length : '0';
+}
+
+/* ================================================================
+ * 八、文件读取 / 图片处理
+ * ================================================================ */
+function loadFile(f) {
+  showLoading('正在解析文件…');
+  f.arrayBuffer().then(function (buf) {
+    var wb;
+    try {
+      // 完整解析：样式 / 数字格式 / 日期 / 公式 / 单元格图片
+      wb = XLSX.read(buf, { type: 'array', cellStyles: true, cellText: true, cellNF: true, cellDates: true, cellFormula: true, cellImages: true });
+    } catch (e1) {
+      try { // 部分文件图片/样式解析失败时降级为纯数据解析
+        wb = XLSX.read(buf, { type: 'array' });
+        toast('部分格式（样式/图片）未能解析，数据已加载');
+      } catch (e2) { hideLoading(); toast('无法解析该文件，请确认为 .xlsx 格式'); return; }
+    }
+    if (!wb.SheetNames.length) { hideLoading(); toast('文件中没有工作表'); return; }
+    // 提取原文件样式（styles.xml/theme + 每格样式索引）与下拉选项，导出时原样放回
+    var prep = (typeof JSZip !== 'undefined')
+      ? extractOrigParts(buf, wb.SheetNames).catch(function () { return null; })
+      : Promise.resolve(null);
+    prep.then(function (orig) {
+      // 初始化状态（全部内存副本，原文件始终未动）
+      initStateFromWb(wb, f.name, null, orig);
+      importExistingImages(); // 读取原文件中已有的图片（社区版无图片解析，实际为 Pro 兼容）
+      hideLoading();
+      toast('已加载「' + f.name + '」，共 ' + wb.SheetNames.length + ' 个工作表');
+      enterWorkflow();
+      if (!state.inv) setTimeout(function () { toast('点击单元格编辑 · 点击行/列标题选整行/整列'); }, 2600);
+    });
+  }).catch(function () {
+    hideLoading();
+    toast('文件读取失败');
+  });
+}
+
+/**
+ * 将原文件中的单元格图片导入内存（可随导出保留）。
+ * 说明：SheetJS 社区版（0.18.5/0.20.3）不含图片解析代码（图片读写为 Pro 功能），
+ * 故本函数在社区版下不会读到任何图片（保留作 Pro 兼容）。
+ * 用户新增的图片不受影响：它们由本工具自行管理（state.images），
+ * 导出时通过 drawing 部件注入，Excel 打开正常显示。
+ */
+function importExistingImages() {
+  for (var i = 0; i < state.sheetNames.length; i++) {
+    var name = state.sheetNames[i];
+    var ws = state.wb.Sheets[name];
+    var imgs = ws['!images'];
+    if (!imgs || !imgs.length) continue;
+    for (var k = 0; k < imgs.length; k++) {
+      try {
+        var im = imgs[k], pos = im.position;
+        if (!pos || pos.r == null || pos.c == null) continue;
+        var mime = im.type === 'jpeg' ? 'image/jpeg' : 'image/png';
+        var dataUrl = null;
+        if (im.data instanceof Uint8Array) dataUrl = 'data:' + mime + ';base64,' + u8ToB64(im.data);
+        else if (im.data instanceof ArrayBuffer) dataUrl = 'data:' + mime + ';base64,' + u8ToB64(new Uint8Array(im.data));
+        else if (typeof im.data === 'string') dataUrl = im.data.indexOf('data:') === 0 ? im.data : ('data:' + mime + ';base64,' + im.data);
+        if (!dataUrl) continue;
+        var addr = rcToAddr(pos.r, pos.c);
+        if (!state.images[name]) state.images[name] = {};
+        if (!state.images[name][addr]) state.images[name][addr] = [];
+        state.images[name][addr].push({ dataUrl: dataUrl, ext: im.type === 'jpeg' ? 'jpg' : 'png', w: 0, h: 0, name: '原图' });
+      } catch (e) { /* 单张图片失败不影响整体加载 */ }
+    }
+  }
+  // 异步探测原图尺寸（导出时按比例缩放到单元格）
+  for (var n in state.images) {
+    for (var a in state.images[n]) {
+      var list = state.images[n][a];
+      for (var k2 = 0; k2 < list.length; k2++) {
+        (function (sn, sa, im2) {
+          var t = new Image();
+          t.onload = function () {
+            im2.w = t.naturalWidth;
+            im2.h = t.naturalHeight;
+            if (state.activeSheet === sn) renderGrid();
+          };
+          t.src = im2.dataUrl;
+        })(n, a, list[k2]);
+      }
+    }
+  }
+}
+
+/** 读取用户选择的图片文件（过大时自动压缩到 1024px 内） */
+function loadImageFile(file) {
+  return new Promise(function (res, rej) {
+    var fr = new FileReader();
+    fr.onerror = function () { rej('图片读取失败'); };
+    fr.onload = function () {
+      var dataUrl = fr.result;
+      var im = new Image();
+      im.onload = function () {
+        var w = im.naturalWidth, h = im.naturalHeight;
+        // 格式从 dataUrl 本身判断（部分安卓相机 file.type 为空，会误标成 png）
+        var mime = /^data:image\/([a-zA-Z0-9]+);/.exec(dataUrl);
+        var out = dataUrl, ext = (mime && (mime[1] === 'jpeg' || mime[1] === 'jpg')) ? 'jpg' : 'png';
+        if (file.size > 1024 * 1024 || w > 1024) {
+          var scale = Math.min(1, 1024 / Math.max(w, h));
+          var cv = document.createElement('canvas');
+          cv.width = Math.max(1, Math.round(w * scale));
+          cv.height = Math.max(1, Math.round(h * scale));
+          cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
+          out = cv.toDataURL('image/png');
+          ext = 'png'; w = cv.width; h = cv.height;
+        }
+        res({ dataUrl: out, ext: ext, w: w, h: h, name: file.name });
+      };
+      im.onerror = function () { rej('无法识别该图片格式，请使用 JPG/PNG 或截图'); };
+      im.src = dataUrl;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+/** 打开系统相册/文件选择器，把图片插入指定单元格 */
+function pickImageForCell(r, c) {
+  $('fileImg').value = '';
+  state.pendingImgCell = { r: r, c: c };
+  $('fileImg').click();
+}
+
+/* ================================================================
+ * 九、导出（SheetJS 基础写入 + JSZip 注入图片/原生复选框）
+ * ================================================================ */
+function countImages() {
+  var n = 0;
+  for (var i = 0; i < state.sheetNames.length; i++) {
+    var imgs = state.images[state.sheetNames[i]] || {};
+    for (var a in imgs) n += (imgs[a] ? imgs[a].length : 0);
+  }
+  return n;
+}
+function countCheckboxes() {
+  var n = 0;
+  for (var i = 0; i < state.sheetNames.length; i++) n += (state.checkboxSets[state.sheetNames[i]] || new Set()).size;
+  return n;
+}
+function openExportConfirm() {
+  showConfirm('保存并分享',
+    '将生成一个全新的 Excel 文件（您设备上的原文件不受任何影响）\n\n' +
+    '工作表 ' + state.sheetNames.length + ' 个 · 照片 ' + countImages() + ' 张 · 复选框 ' + countCheckboxes() + ' 个\n\n' +
+    '文件名：' + exportName() + '\n\n生成后将调起手机分享面板，选择「微信」即可发送给好友。',
+    doExport, '生成并分享');
+}
+function doExport() {
+  showLoading('正在生成 Excel 文件…');
+  setTimeout(function () { // 先让加载动画渲染
+    try {
+      var buf = XLSX.write(state.wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+      // 后处理：注入图片/复选框，再放回原文件样式与下拉选项
+      var p = Promise.resolve(buf);
+      if (typeof JSZip !== 'undefined' && (countImages() > 0 || countCheckboxes() > 0)) p = injectExtras(buf);
+      p.then(function (b) { return applyOrigStyles(b); }).then(function (nbuf) {
+        finishExport(nbuf);
+      }).catch(function (e) {
+        console.warn('[导出] 增强处理失败，使用基础导出', e);
+        finishExport(buf);
+      });
+    } catch (e) {
+      hideLoading();
+      toast('导出失败：' + e.message);
+    }
+  }, 50);
+}
+function finishExport(buf) {
+  hideLoading();
+  persistNow(); // 同时把当前状态保存进文件库
+  // 调起系统分享面板（可发微信），不支持时回退为下载
+  shareOrDownload(buf);
+}
+
+/* ---------- 导出后处理：注入图片与复选框 ---------- */
+var REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';      // 包级关系文件（.rels）的命名空间
+var DOC_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'; // 部件内引用（如 a:blip 的 r:embed）必须用文档级命名空间
+var TYPE_DRAWING = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing';
+var TYPE_VML = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing';
+var TYPE_IMAGE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image';
+var CT_VML = 'application/vnd.openxmlformats-officedocument.vmlDrawing';
+var CT_DRAWING = 'application/vnd.openxmlformats-officedocument.drawing+xml';
+
+function maxRId(relsXml) {
+  var m = 0, x, re = /Id="rId(\d+)"/g;
+  while ((x = re.exec(relsXml))) m = Math.max(m, parseInt(x[1], 10));
+  return m;
+}
+function addRel(relsXml, id, type, target) {
+  return relsXml.replace('</Relationships>',
+    '<Relationship Id="rId' + id + '" Type="' + type + '" Target="' + target + '"/></Relationships>');
+}
+/**
+ * 在 worksheet XML 的合法位置插入 drawing / legacyDrawing 元素。
+ * schema 顺序：... mergeCells → dataValidations → ... → ignoredErrors → drawing → legacyDrawing → ...
+ * Excel 对元素顺序严格，放错位置会在打开时修复并丢弃图形（图片不显示）。
+ * SheetJS 写出的结尾只有 ignoredErrors（有则在其后），否则直接放在 </worksheet> 前。
+ */
+function insertSheetElements(sheetXml, addsXml) {
+  var i = sheetXml.indexOf('</ignoredErrors>');
+  if (i >= 0) return sheetXml.slice(0, i + '</ignoredErrors>'.length) + addsXml + sheetXml.slice(i + '</ignoredErrors>'.length);
+  // 无 ignoredErrors：schema 上 drawing 须在 tableParts/extLst 之前，插到它们前面
+  var anchors2 = ['<tableParts', '<extLst'];
+  for (var k = 0; k < anchors2.length; k++) {
+    var j = sheetXml.indexOf(anchors2[k]);
+    if (j >= 0) return sheetXml.slice(0, j) + addsXml + sheetXml.slice(j);
+  }
+  return sheetXml.replace('</worksheet>', addsXml + '</worksheet>');
+}
+/** 在合法位置插入 dataValidations（mergeCells 之后、ignoredErrors 之前） */
+function insertDataValidations(sheetXml, dvXml) {
+  var i = sheetXml.indexOf('</mergeCells>');
+  if (i >= 0) {
+    // conditionalFormatting 若排在 mergeCells 之后，DV 要插在它后面
+    var j = sheetXml.lastIndexOf('</conditionalFormatting>');
+    if (j > i) return sheetXml.slice(0, j + '</conditionalFormatting>'.length) + dvXml + sheetXml.slice(j + '</conditionalFormatting>'.length);
+    return sheetXml.slice(0, i + '</mergeCells>'.length) + dvXml + sheetXml.slice(i + '</mergeCells>'.length);
+  }
+  // 无 mergeCells：插到第一个「schema 上排在 DV 之后」的元素前面（此处恒合法，不受中间元素影响）
+  var after = ['<hyperlinks', '<printOptions', '<pageMargins', '<pageSetup', '<headerFooter', '<rowBreaks', '<colBreaks', '<ignoredErrors', '<drawing', '<legacyDrawing', '<tableParts', '<extLst'];
+  var pos = -1;
+  for (var k = 0; k < after.length; k++) {
+    var p = sheetXml.indexOf(after[k]);
+    if (p >= 0 && (pos < 0 || p < pos)) pos = p;
+  }
+  if (pos >= 0) return sheetXml.slice(0, pos) + dvXml + sheetXml.slice(pos);
+  return sheetXml.replace('</worksheet>', dvXml + '</worksheet>');
+}
+
+/**
+ * 生成 VML 传统表单控件（Excel 2007+ 全版本兼容的原生复选框）。
+ * x:Anchor 格式：fromCol, fromColOff, fromRow, fromRowOff, toCol, toColOff, toRow, toRowOff
+ * 勾选状态写入 <x:Checked>，链接单元格写入 <x:FmlaLink>。
+ */
+function buildVml(name, addrs) {
+  var ws = state.wb.Sheets[name];
+  var shapes = '';
+  for (var i = 0; i < addrs.length; i++) {
+    var a = addrs[i], pos = addrToRC(a);
+    var cell = ws[a];
+    var checked = !!(cell && cell.t === 'b' && cell.v);
+    var idx = i + 1;
+    shapes += '<v:shape id="cb' + idx + '" o:spid="_x0000_s' + (1024 + idx) + '" type="#_x0000_t201"' +
+      ' style="position:absolute;margin-left:1.5pt;margin-top:1.5pt;width:12pt;height:12pt;z-index:' + idx + ';visibility:visible"' +
+      ' fillcolor="#ffc000" strokecolor="windowText" o:button="t" o:insetmode="auto">' +
+      '<v:fill color2="#ffffe1" o:detectmouseclick="t"/>' +
+      '<o:lock v:ext="edit" rotation="t"/>' +
+      '<x:ClientData ObjectType="Checkbox">' +
+      '<x:MoveWithCells/><x:SizeWithCells/>' +
+      '<x:Anchor>' + pos.c + ',0,' + pos.r + ',0,' + (pos.c + 1) + ',0,' + (pos.r + 1) + ',0</x:Anchor>' +
+      '<x:AutoFill>False</x:AutoFill><x:AutoLine>False</x:AutoLine>' +
+      '<x:TextVAlign>Center</x:TextVAlign><x:NoThreeD/>' +
+      '<x:FmlaLink>$' + colName(pos.c) + '$' + (pos.r + 1) + '</x:FmlaLink>' +
+      '<x:Checked>' + (checked ? 1 : 0) + '</x:Checked>' +
+      '</x:ClientData></v:shape>';
+  }
+  return '<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">' +
+    '<o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>' +
+    '<v:shapetype id="_x0000_t201" coordsize="21600,21600" o:spt="201" path="m,l,21600r21600,l21600,xe">' +
+    '<v:stroke joinstyle="miter"/><v:path shadowok="f" o:extrusionok="f" gradientshapeok="t" o:connecttype="rect"/>' +
+    '<o:lock v:ext="edit" shapetype="t"/>' +
+    '</v:shapetype>' + shapes + '</xml>';
+}
+
+/** 主后处理流程：解压 → 注入 drawing/vml 部件与关系 → 重新压缩 */
+function injectExtras(buf) {
+  return JSZip.loadAsync(buf).then(function (zip) {
+    var ctPath = '[Content_Types].xml';
+    var ct = zip.file(ctPath).async('string');
+    var ctDefaults = [], ctOverrides = [], ctAdded = [];
+    function addCTDefault(xml) { var m = /Extension="([^"]+)"/.exec(xml); if (m && ctAdded.indexOf('E=' + m[1]) < 0 && ct.indexOf('Extension="' + m[1] + '"') < 0) { ctAdded.push('E=' + m[1]); ctDefaults.push(xml); } }
+    function addCTOverride(xml) { var m = /PartName="([^"]+)"/.exec(xml); if (m && ctAdded.indexOf('P=' + m[1]) < 0 && ct.indexOf('PartName="' + m[1] + '"') < 0) { ctAdded.push('P=' + m[1]); ctOverrides.push(xml); } }
+
+    var jobs = ct.then(function (ctXml) {
+      ct = ctXml;
+      var chain = Promise.resolve();
+      var mediaIdx = 0, drawingIdx = 0, vmlIdx = 0;
+      for (var i = 0; i < state.sheetNames.length; i++) {
+        (function (i) {
+          var name = state.sheetNames[i];
+          var sheetPath = 'xl/worksheets/sheet' + (i + 1) + '.xml';
+          var relsPath = 'xl/worksheets/_rels/sheet' + (i + 1) + '.xml.rels';
+          chain = chain.then(function () {
+            var sheetF = zip.file(sheetPath);
+            if (!sheetF) return Promise.resolve();
+            return sheetF.async('string').then(function (sheetXml) {
+              var relsP = zip.file(relsPath) ? zip.file(relsPath).async('string')
+                : Promise.resolve('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="' + REL_NS + '"></Relationships>');
+              return relsP.then(function (relsXml) {
+                var rid = maxRId(relsXml) + 1;
+                var relsToAdd = [];
+                function nextRel(type, target) { relsToAdd.push({ id: 'rId' + rid, type: type, target: target }); return 'rId' + (rid++); }
+                var sheetAdds = [];
+
+                /* ---- 图片（xdr drawing 部件，锚定单元格；多张时并排均分） ---- */
+                var imgs = state.images[name] || {};
+                var imgAddrs = Object.keys(imgs).filter(function (a) { return imgs[a] && imgs[a].length; });
+                if (imgAddrs.length) {
+                  drawingIdx++;
+                  var drawingPath = 'xl/drawings/drawing' + drawingIdx + '.xml';
+                  var dRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="' + REL_NS + '"></Relationships>';
+                  var anchorsXml = '';
+                  var drId = 0;
+                  var lay = getLayout(name);
+                  for (var k = 0; k < imgAddrs.length; k++) {
+                    var a = imgAddrs[k], imgList = imgs[a], pos = addrToRC(a);
+                    var cp = lay.colPos.get(pos.c), rp = lay.rowPos.get(pos.r);
+                    var cellW = cp ? cp.w : 90, cellH = rp ? rp.h : 34;
+                    // 每张图按该单元格内可分到的宽度等比缩放
+                    for (var m2 = 0; m2 < imgList.length; m2++) {
+                      var im = imgList[m2];
+                      if (!im.dataUrl) continue;
+                      // 格式以 dataUrl 前缀为准（旧记录可能标错 ext）
+                      var dm = /^data:image\/([a-zA-Z0-9]+);/.exec(im.dataUrl || '');
+                      var isJpg = im.ext === 'jpg' || im.ext === 'jpeg' || (dm && (dm[1] === 'jpeg' || dm[1] === 'jpg'));
+                      var mediaName = 'image' + (++mediaIdx) + '.' + (isJpg ? 'jpg' : 'png');
+                      var mime = isJpg ? 'image/jpeg' : 'image/png';
+                      zip.file('xl/media/' + mediaName, dataUrlToU8(im.dataUrl));
+                      drId++;
+                      dRels = addRel(dRels, drId, TYPE_IMAGE, '../media/' + mediaName);
+                      var slotW = cellW / imgList.length;
+                      var nw = im.w || 120, nh = im.h || 90;
+                      var scale = Math.min(1, slotW / nw, cellH / nh);
+                      var dw = nw * scale, dh = nh * scale;
+                      var colOff = Math.round((m2 * slotW + (slotW - dw) / 2) * 9525);
+                      var rowOff = Math.round((cellH - dh) / 2 * 9525);
+                      var from = '<xdr:from><xdr:col>' + pos.c + '</xdr:col><xdr:colOff>' + colOff + '</xdr:colOff><xdr:row>' + pos.r + '</xdr:row><xdr:rowOff>' + rowOff + '</xdr:rowOff></xdr:from>';
+                      // oneCellAnchor + ext 结构（与 Excel 实际文件结构一致，参照 exceljs 等成熟库的产出格式验证）
+                      // 注意：oneCellAnchor 不带 editAs 属性（Excel 自身也不写，带上会被 openpyxl/Excel 拒绝）
+                      anchorsXml += '<xdr:oneCellAnchor>' + from +
+                        '<xdr:ext cx="' + Math.round(dw * 9525) + '" cy="' + Math.round(dh * 9525) + '"/>' +
+                        '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="' + drId + '" name="Picture ' + drId + '"/>' +
+                        '<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>' +
+                        '<xdr:blipFill><a:blip xmlns:r="' + DOC_NS + '" r:embed="rId' + drId + '" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>' +
+                        '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>' +
+                        '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor>';
+                      addCTDefault('<Default Extension="' + (isJpg ? 'jpg' : 'png') + '" ContentType="' + mime + '"/>');
+                    }
+                  }
+                  zip.file(drawingPath, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+                    '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+                    anchorsXml + '</xdr:wsDr>');
+                  zip.file('xl/drawings/_rels/drawing' + drawingIdx + '.xml.rels', dRels);
+                  sheetAdds.push('<drawing r:id="' + nextRel(TYPE_DRAWING, '../drawings/drawing' + drawingIdx + '.xml') + '"/>');
+                  addCTOverride('<Override PartName="/xl/drawings/drawing' + drawingIdx + '.xml" ContentType="' + CT_DRAWING + '"/>');
+                }
+
+                /* ---- 复选框（VML 传统表单控件） ---- */
+                var cbSet = state.checkboxSets[name];
+                var cbAddrs = cbSet ? Array.from(cbSet).filter(function (a) { return state.wb.Sheets[name][a]; }) : [];
+                if (cbAddrs.length) {
+                  vmlIdx++;
+                  zip.file('xl/drawings/vmlDrawing' + vmlIdx + '.vml', buildVml(name, cbAddrs));
+                  sheetAdds.push('<legacyDrawing r:id="' + nextRel(TYPE_VML, '../drawings/vmlDrawing' + vmlIdx + '.vml') + '"/>');
+                  addCTDefault('<Default Extension="vml" ContentType="' + CT_VML + '"/>');
+                }
+
+                if (!sheetAdds.length) return Promise.resolve();
+                // 写入关系与工作表 XML
+                for (var j = 0; j < relsToAdd.length; j++)
+                  relsXml = addRel(relsXml, parseInt(relsToAdd[j].id.slice(3), 10), relsToAdd[j].type, relsToAdd[j].target);
+                zip.file(relsPath, relsXml);
+                zip.file(sheetPath, insertSheetElements(sheetXml, sheetAdds.join('')));
+                return Promise.resolve();
+              });
+            });
+          });
+        })(i);
+      }
+      return chain.then(function () {
+        if (ctDefaults.length || ctOverrides.length)
+          zip.file(ctPath, ct.replace('</Types>', ctDefaults.join('') + ctOverrides.join('') + '</Types>'));
+        return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+      });
+    });
+    return jobs;
+  });
+}
+
+/* ---------- 原文件样式保留（字体 / 单元格颜色） ---------- */
+/**
+ * SheetJS 社区版写出时不含样式（样式写出为 Pro 功能），导出会丢字体与单元格颜色；
+ * 也不读写数据验证。对策：从压缩包提取 styles.xml / theme1.xml / 每格样式索引 /
+ * 数据验证（下拉选项），导出后处理时原样放回——原文件格式 100% 保留。
+ */
+function extractOrigParts(buf, sheetNames) {
+  return JSZip.loadAsync(buf).then(function (zip) {
+    var out = { styles: null, theme: null, sheetS: {}, dvs: {} };
+    var jobs = [];
+    var sf = zip.file('xl/styles.xml');
+    if (sf) jobs.push(sf.async('string').then(function (s) { out.styles = s; }));
+    var tf = zip.file('xl/theme/theme1.xml');
+    if (tf) jobs.push(tf.async('string').then(function (s) { out.theme = s; }));
+    for (var i = 0; i < sheetNames.length; i++) {
+      (function (i) {
+        var f = zip.file('xl/worksheets/sheet' + (i + 1) + '.xml');
+        if (!f) return;
+        jobs.push(f.async('string').then(function (xml) {
+          var m = {}, re = /<c\s[^>]*?r="([A-Z]+\d+)"[^>]*?>/g, x;
+          while ((x = re.exec(xml))) {
+            var sm = /(?:^|\s)s="(\d+)"/.exec(x[0]);
+            if (sm) m[x[1]] = parseInt(sm[1], 10);
+          }
+          out.sheetS[sheetNames[i]] = m;
+          // 数据验证（下拉选项）：社区版不读 !dataValidation，自行从 XML 提取
+          var list = [], re2 = /<dataValidation\s[^>]*?>/g, x2;
+          while ((x2 = re2.exec(xml))) {
+            var tag = x2[0];
+            var tm = /type="([^"]*)"/.exec(tag), sm2 = /sqref="([^"]*)"/.exec(tag);
+            if (!sm2) continue;
+            var end = xml.indexOf('</dataValidation>', x2.index);
+            var inner = xml.slice(x2.index + tag.length, end < 0 ? x2.index + tag.length + 500 : end);
+            var fm = /<formula1>([\s\S]*?)<\/formula1>/.exec(inner);
+            if (!fm) continue;
+            list.push({
+              type: tm ? tm[1] : 'list',
+              allowBlank: !/allowBlank="0"/.test(tag),
+              showDropDown: !/showDropDown="0"/.test(tag),
+              showInputMessage: !/showInputMessage="0"/.test(tag),
+              showErrorMessage: !/showErrorMessage="0"/.test(tag),
+              formula1: fm[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+              sqref: sm2[1]
+            });
+          }
+          if (list.length) out.dvs[sheetNames[i]] = list;
+        }));
+      })(i);
+    }
+    return Promise.all(jobs).then(function () { return out; });
+  });
+}
+/** 从数据验证模型生成 <dataValidations> XML（社区版写出不含数据验证，需自行注入） */
+function buildDataValidationsXml(list) {
+  var xml = '<dataValidations count="' + list.length + '">';
+  for (var i = 0; i < list.length; i++) {
+    var dv = list[i];
+    if (!dv || !dv.formula1 || !dv.sqref) continue;
+    // 属性写法与 Excel/WPS 原生输出完全一致（实测 WPS 对显式 showDropDown 兼容性差，
+    // 原文件都是省略 showDropDown、显式写 showInputMessage/showErrorMessage="1"）
+    var attrs = ' type="' + escAttr(dv.type || 'list') + '"';
+    if (dv.errorStyle) attrs += ' errorStyle="' + escAttr(dv.errorStyle) + '"';
+    if (dv.operator) attrs += ' operator="' + escAttr(dv.operator) + '"';
+    attrs += ' allowBlank="' + (dv.allowBlank === false ? '0' : '1') + '"';
+    if (dv.showDropDown === false) attrs += ' showDropDown="0"';
+    attrs += ' showInputMessage="' + (dv.showInputMessage === false ? '0' : '1') + '"';
+    attrs += ' showErrorMessage="' + (dv.showErrorMessage === false ? '0' : '1') + '"';
+    if (dv.errorTitle) attrs += ' errorTitle="' + escAttr(dv.errorTitle) + '"';
+    if (dv.error) attrs += ' error="' + escAttr(dv.error) + '"';
+    if (dv.promptTitle) attrs += ' promptTitle="' + escAttr(dv.promptTitle) + '"';
+    if (dv.prompt) attrs += ' prompt="' + escAttr(dv.prompt) + '"';
+    attrs += ' sqref="' + escAttr(dv.sqref) + '"';
+    xml += '<dataValidation' + attrs + '><formula1>' + escHtml(dv.formula1) + '</formula1>';
+    if (dv.formula2) xml += '<formula2>' + escHtml(dv.formula2) + '</formula2>';
+    xml += '</dataValidation>';
+  }
+  return xml + '</dataValidations>';
+}
+/**
+ * 导出后处理：把原始 styles.xml / theme1.xml 放回压缩包，
+ * 给每个单元格补回原始样式索引，并注入数据验证（下拉选项）。
+ */
+function applyOrigStyles(buf) {
+  var orig = state.origStyle;
+  var need = 0;
+  for (var s2 = 0; s2 < state.sheetNames.length; s2++) {
+    var dvs = state.wb.Sheets[state.sheetNames[s2]] && state.wb.Sheets[state.sheetNames[s2]]['!dataValidation'];
+    if (dvs && dvs.length) need = 1;
+  }
+  if (!need && (!orig || (!orig.styles && !orig.theme))) return Promise.resolve(buf);
+  if (typeof JSZip === 'undefined') return Promise.resolve(buf);
+  return JSZip.loadAsync(buf).then(function (zip) {
+    var jobs = [];
+    for (var i = 0; i < state.sheetNames.length; i++) {
+      (function (i) {
+        var name = state.sheetNames[i];
+        var path = 'xl/worksheets/sheet' + (i + 1) + '.xml';
+        var f = zip.file(path);
+        if (!f) return;
+        var map = orig && orig.sheetS && orig.sheetS[name];
+        var dvs = state.wb.Sheets[name] && state.wb.Sheets[name]['!dataValidation'];
+        jobs.push(f.async('string').then(function (xml) {
+          if (map && Object.keys(map).length) {
+            // 清掉 SheetJS 自己写的样式索引（索引针对其最小 styles.xml，换回原 styles 后即错位）
+            xml = xml.replace(/ s="\d+"/g, '');
+            for (var addr in map) {
+              xml = xml.replace(new RegExp('(<c r="' + addr + '")', 'g'), '$1 s="' + map[addr] + '"');
+            }
+          }
+          if (dvs && dvs.length && xml.indexOf('<dataValidations') < 0) {
+            xml = insertDataValidations(xml, buildDataValidationsXml(dvs));
+          }
+          zip.file(path, xml);
+        }));
+      })(i);
+    }
+    if (orig && orig.styles) jobs.push(Promise.resolve().then(function () { zip.file('xl/styles.xml', orig.styles); }));
+    if (orig && orig.theme) jobs.push(Promise.resolve().then(function () { zip.file('xl/theme/theme1.xml', orig.theme); }));
+    return Promise.all(jobs).then(function () {
+      return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+    });
+  });
+}
+
+/* ================================================================
+ * 十、UI：面板 / 对话框 / 提示
+ * ================================================================ */
+function openPanel(html, onMount) {
+  $('panel').innerHTML = html;
+  $('panelMask').hidden = false;
+  if (onMount) onMount();
+}
+function closePanel() { $('panelMask').hidden = true; $('panel').innerHTML = ''; panelActions = {}; }
+
+function showConfirm(title, msg, onOk, okText, danger) {
+  $('modalTitle').textContent = title;
+  $('modalMsg').textContent = msg;
+  $('modalBtns').innerHTML = '';
+  var cancel = document.createElement('button');
+  cancel.className = 'mbtn'; cancel.textContent = '取消';
+  cancel.onclick = hideModal;
+  var ok = document.createElement('button');
+  ok.className = 'mbtn ' + (danger ? 'danger' : 'primary');
+  ok.textContent = okText || '确定';
+  ok.onclick = function () { hideModal(); if (onOk) onOk(); };
+  $('modalBtns').appendChild(cancel);
+  $('modalBtns').appendChild(ok);
+  $('modalMask').hidden = false;
+}
+function hideModal() { $('modalMask').hidden = true; }
+function showAlert(title, msg) { showConfirm(title, msg, null, '知道了'); }
+
+var toastTimer = null;
+function toast(msg) {
+  $('toast').textContent = msg;
+  $('toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { $('toast').classList.remove('show'); }, 2400);
+}
+function showLoading(t) { $('loadingText').textContent = t; $('loading').hidden = false; }
+function hideLoading() { $('loading').hidden = true; }
+
+function showBanner(text) { $('rangeBanner').hidden = false; $('rangeBannerText').textContent = text; }
+function hideBanner() { $('rangeBanner').hidden = true; }
+
+/** 单元格编辑面板 */
+function openCellPanel(addr) {
+  var name = state.activeSheet, ws = state.wb.Sheets[name];
+  var cell = ws[addr];
+  var isCb = cbSetHas(name, addr);
+  var hasImg = !!(state.images[name] && state.images[name][addr]);
+  var cur = cell ? (cell.w != null ? String(cell.w) : (cell.v != null ? String(cell.v) : '')) : '';
+  openPanel(
+    '<div class="panel-head"><div class="panel-title">编辑单元格 <b>' + addr + '</b></div>' +
+    '<button class="icon-btn" data-act="close">✕</button></div>' +
+    '<textarea id="pInput" rows="3" placeholder="输入新内容（数字会自动识别为数值）" autocapitalize="off"></textarea>' +
+    '<div class="panel-row">' +
+    '<button class="pbtn primary" data-act="save">保存</button>' +
+    '<button class="pbtn" data-act="img">🖼 图片' + (hasImg ? '(+1张)' : '') + '</button>' +
+    '<button class="pbtn" data-act="cb">' + (isCb ? '☐ 移除复选框' : '☑️ 加复选框') + '</button>' +
+    '</div>' +
+    '<div class="panel-row"><button class="pbtn warn" data-act="clear">🗑 清空</button></div>' +
+    '<div class="panel-tip">' + (isCb ? '该单元格已带复选框：点击表格中的勾选框切换状态，导出后在 Excel/WPS 中仍可勾选。' : '') + '</div>',
+    function () {
+      $('pInput').value = cur;
+      $('pInput').focus();
+      $('pInput').setSelectionRange(cur.length, cur.length);
+    });
+  panelActions = {
+    close: closePanel,
+    save: function () { var v = $('pInput').value; closePanel(); saveCellEdit(addr, v); },
+    img: function () { closePanel(); pickImageForCell(state.sel.r, state.sel.c); },
+    cb: function () {
+      closePanel();
+      if (isCb) removeCheckboxes(name, [addr]);
+      else addCheckboxes(name, [addr]);
+    },
+    clear: function () {
+      showConfirm('清空单元格', '确定清空 ' + addr + ' 的内容吗？可通过「撤销」恢复。',
+        function () { closePanel(); clearCells(name, [addr]); }, '清空', true);
+    }
+  };
+}
+
+/** 范围编辑面板（批量填充 / 复选框 / 清空） */
+function openRangePanel() {
+  var lay = getLayout(state.activeSheet);
+  var rg = state.range;
+  var label = rg ? rcToAddr(rg.r1, rg.c1) + ':' + rcToAddr(rg.r2, rg.c2) + '（' + rangeCount(rg) + ' 个单元格）' : '未选择范围';
+  openPanel(
+    '<div class="panel-head"><div class="panel-title">范围编辑</div>' +
+    '<button class="icon-btn" data-act="close">✕</button></div>' +
+    '<div class="panel-sub" id="pRangeLabel">当前范围：' + label + '</div>' +
+    '<div class="panel-row">' +
+    '<input id="pRangeInput" placeholder="A1:C10 / 3:5(行) / C:F(列)" autocapitalize="off" autocorrect="off">' +
+    '<button class="pbtn" data-act="applyAddr" style="flex:0 0 auto;padding:0 14px">应用</button>' +
+    '</div>' +
+    '<textarea id="pInput" rows="3" placeholder="输入要批量填入的内容…" autocapitalize="off"></textarea>' +
+    '<div class="panel-row">' +
+    '<button class="pbtn primary" data-act="fill">批量填充</button>' +
+    '<button class="pbtn" data-act="pick">⊞ 点选范围</button>' +
+    '</div>' +
+    '<div class="panel-row">' +
+    '<button class="pbtn" data-act="cbAdd">☑️ 加复选框</button>' +
+    '<button class="pbtn" data-act="cbDel">☐ 移除复选框</button>' +
+    '<button class="pbtn warn" data-act="clear">🗑 清空</button>' +
+    '</div>' +
+    '<div class="panel-tip">提示：直接点击行/列标题（如 A、3）即可选择整列/整行。</div>',
+    function () {
+      if (state.range) $('pRangeInput').value = rcToAddr(state.range.r1, state.range.c1) + ':' + rcToAddr(state.range.r2, state.range.c2);
+    });
+  function needRange() {
+    if (state.range) return true;
+    toast('请先选择或输入范围');
+    return false;
+  }
+  function safeCount(rg2) {
+    var n = rangeCount(rg2);
+    if (n > MAX_RANGE_CELLS) { toast('范围过大（超过 ' + MAX_RANGE_CELLS + ' 个单元格），请缩小范围'); return 0; }
+    return n;
+  }
+  panelActions = {
+    close: closePanel,
+    applyAddr: function () {
+      var rg2 = parseRangeText($('pRangeInput').value, lay.nRows || lay.rows.length, lay.cols.length);
+      if (!rg2) { toast('范围格式不正确，示例：A1:C10、3:5、C:F'); return; }
+      state.range = rg2;
+      renderGrid();
+      openRangePanel();
+    },
+    pick: function () { closePanel(); enterRangeMode(); },
+    fill: function () {
+      if (!needRange()) return;
+      var rg2 = state.range, text = $('pInput').value;
+      if (text === '') { toast('请输入要填入的内容'); return; }
+      var n = safeCount(rg2); if (!n) return;
+      var doIt = function () { closePanel(); fillRangeText(state.activeSheet, rg2, text); };
+      if (n > 5000) showConfirm('批量填充', '将对 ' + n + ' 个单元格执行填充，可能耗时较长，确定继续吗？', doIt, '继续填充');
+      else doIt();
+    },
+    cbAdd: function () {
+      if (!needRange()) return;
+      var n = safeCount(state.range); if (!n) return;
+      var doIt = function () { closePanel(); addCheckboxes(state.activeSheet, rangeAddrs(state.range)); };
+      if (n > 2000) showConfirm('添加复选框', '将为 ' + n + ' 个单元格添加复选框，确定继续吗？', doIt, '继续');
+      else doIt();
+    },
+    cbDel: function () {
+      if (!needRange()) return;
+      var n = safeCount(state.range); if (!n) return;
+      closePanel();
+      removeCheckboxes(state.activeSheet, rangeAddrs(state.range));
+    },
+    clear: function () {
+      if (!needRange()) return;
+      var n = safeCount(state.range); if (!n) return;
+      showConfirm('清空内容', '确定清空所选范围 ' + n + ' 个单元格的内容吗？可通过「撤销」恢复。',
+        function () { closePanel(); clearCells(state.activeSheet, rangeAddrs(state.range)); }, '清空', true);
+    }
+  };
+}
+
+/** 使用说明 */
+function openHelp() {
+  openPanel(
+    '<div class="panel-head"><div class="panel-title">📖 使用说明</div>' +
+    '<button class="icon-btn" data-act="close">✕</button></div>' +
+    '<div class="help-body">' +
+    '<h3>① 首页文件库</h3>' +
+    '所有导入和填写过的表格都<b>自动保存在首页</b>，随时点「打开」继续填；不需要的可点「删除」。' +
+    '点右下角「＋ 添加 Excel」导入新表格（.xlsx / .xls）。' +
+    '文件仅在内存中解析，<b>原文件绝不会被修改或覆盖</b>。' +
+    '<h3>② 盘点模式（自动）</h3>' +
+    '导入后自动识别<b>红色表头列</b>为待填写项：' +
+    '<ul>' +
+    '<li>点任意记录卡片进入填写页；</li>' +
+    '<li>「使用状况」「记录状况」等字段可直接<b>点选选项</b>，其余字段自由输入；</li>' +
+    '<li>图片字段点「📷 拍照」可<b>连续拍多张</b>，不会覆盖之前的照片；</li>' +
+    '<li>顶部搜索框按<b>表头字段</b>（卡片编号、资产编码等）搜索，输入时自动跳出匹配选项。</li>' +
+    '</ul>' +
+    '<h3>③ 通用表格编辑</h3>' +
+    '盘点页点「▦ 表格」可切到整表视图：点击单元格直接编辑、批量填充、插入图片、加复选框。' +
+    '<h3>④ 撤销 / 重做</h3>' +
+    '顶部 ↶ / ↷ 按钮，每步操作都可回退，最多保留 ' + MAX_UNDO + ' 步。' +
+    '<h3>⑤ 保存分享</h3>' +
+    '点「⬇ 保存分享」生成全新 Excel 文件并调起系统分享面板，选择<b>微信</b>即可发送给好友；' +
+    '不支持分享的浏览器会自动改为下载到手机。' +
+    '<h3>常见问题</h3>' +
+    '<ul>' +
+    '<li><b>填写的内容丢不了吗？</b>每次改动都会自动保存到首页文件库（保存在手机浏览器里）；</li>' +
+    '<li><b>换浏览器/清数据会怎样？</b>数据存在当前浏览器的本地存储中，清除浏览器数据前请先导出保存；</li>' +
+    '<li><b>复选框在 Excel 里什么样？</b>导出后是 Excel 原生复选框控件（可勾选），同时单元格内有 TRUE/FALSE 状态值；</li>' +
+    '<li><b>图片会动吗？</b>图片锚定在单元格内，随单元格一起移动缩放；</li>' +
+    '<li><b>能离线用吗？</b>首次打开需联网加载组件库。</li>' +
+    '</ul>' +
+    '</div>',
+    null);
+  panelActions = { close: closePanel };
+}
+
+/* ================================================================
+ * 十一、选择 / 定位交互
+ * ================================================================ */
+function enterRangeMode() {
+  state.rangeMode = true;
+  state.pickForImage = false;
+  $('btnRangeMode').classList.add('active');
+  showBanner('范围模式：先点起点单元格（或行/列标题），再点终点单元格');
+}
+function exitRangeMode() {
+  state.rangeMode = false;
+  state.rangePick = null;
+  $('btnRangeMode').classList.remove('active');
+  hideBanner();
+}
+function pickRangePoint(r, c) {
+  var p = state.rangePick;
+  if (!p) {
+    state.rangePick = { r1: r, c1: c, r2: r, c2: c };
+    renderGrid();
+    return;
+  }
+  state.range = norm(p.r1, p.c1, r, c);
+  exitRangeMode();
+  renderGrid();
+  openRangePanel();
+}
+function headerRowTap(r) {
+  var lay = getLayout(state.activeSheet);
+  state.pickForImage = false;
+  exitRangeMode();
+  state.range = { r1: r, c1: 0, r2: r, c2: lay.maxC };
+  renderGrid();
+  openRangePanel();
+}
+function headerColTap(c) {
+  var lay = getLayout(state.activeSheet);
+  state.pickForImage = false;
+  exitRangeMode();
+  state.range = { r1: 0, c1: c, r2: lay.maxR, c2: c };
+  renderGrid();
+  openRangePanel();
+}
+function selAsRange() {
+  if (state.sel.r < 0) return null;
+  return { r1: state.sel.r, c1: state.sel.c, r2: state.sel.r, c2: state.sel.c };
+}
+function switchSheet(name) {
+  state.activeSheet = name;
+  state.sel = { r: -1, c: -1 };
+  state.range = null; state.rangePick = null;
+  $('gridScroll').scrollTop = 0;
+  $('gridScroll').scrollLeft = 0;
+  renderTabs();
+  renderGrid();
+}
+function renderTabs() {
+  $('sheetTabs').innerHTML = '';
+  for (var i = 0; i < state.sheetNames.length; i++) {
+    var n = state.sheetNames[i];
+    var b = document.createElement('button');
+    b.className = 'stab' + (n === state.activeSheet ? ' on' : '');
+    b.textContent = n;
+    b.dataset.name = n;
+    $('sheetTabs').appendChild(b);
+  }
+}
+
+/* ================================================================
+ * 十一、文件库（IndexedDB 持久化）/ 盘点模式 / 保存分享
+ * ================================================================ */
+
+/* ---------- 本地文件库：IndexedDB 存工作副本，不可用时降级内存 ---------- */
+var DB_NAME = 'xls-editor-db', DB_STORE = 'files';
+var _db = null, _dbMem = new Map(), _dbOK = typeof indexedDB !== 'undefined';
+var persistTimer = null;
+
+function dbOpen() {
+  return new Promise(function (res, rej) {
+    if (!_dbOK) { res(null); return; }
+    if (_db) { res(_db); return; }
+    try {
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        if (!req.result.objectStoreNames.contains(DB_STORE)) req.result.createObjectStore(DB_STORE, { keyPath: 'id' });
+      };
+      req.onsuccess = function () { _db = req.result; res(_db); };
+      req.onerror = function () { _dbOK = false; res(null); };
+    } catch (e) { _dbOK = false; res(null); }
+  });
+}
+function dbTx(mode) {
+  return _db.transaction([DB_STORE], mode).objectStore(DB_STORE);
+}
+function dbReq(r) { return new Promise(function (res, rej) { r.onsuccess = function () { res(r.result); }; r.onerror = function () { rej(r.error); }; }); }
+function dbPut(rec) {
+  return dbOpen().then(function (db) {
+    if (!db) { _dbMem.set(rec.id, rec); return; }
+    return dbReq(dbTx('readwrite').put(rec));
+  });
+}
+function dbGetAll() {
+  return dbOpen().then(function (db) {
+    if (!db) return Array.from(_dbMem.values());
+    return dbReq(dbTx('readonly').getAll());
+  });
+}
+function dbGet(id) {
+  return dbOpen().then(function (db) {
+    if (!db) return _dbMem.get(id);
+    return dbReq(dbTx('readonly').get(id));
+  });
+}
+function dbDelete(id) {
+  return dbOpen().then(function (db) {
+    if (!db) { _dbMem.delete(id); return; }
+    return dbReq(dbTx('readwrite').delete(id));
+  });
+}
+function genId() { return 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function setsToObj(sets) { var o = {}; for (var k in sets) o[k] = Array.from(sets[k]); return o; }
+
+/** 生成当前工作副本的完整 xlsx 字节（含图片/复选框注入 + 原样式与下拉选项放回） */
+function buildWorkBytes() {
+  var buf = XLSX.write(state.wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+  var p = Promise.resolve(buf);
+  if (typeof JSZip !== 'undefined' && (countImages() > 0 || countCheckboxes() > 0)) p = injectExtras(buf);
+  return p.then(function (b) { return applyOrigStyles(b); }).catch(function () { return buf; });
+}
+
+/** 把当前工作副本写入文件库（自动保存，防抖） */
+function persistNow() {
+  if (!state.wb) return;
+  clearTimeout(persistTimer);
+  buildWorkBytes().then(function (bytes) {
+    var rec = {
+      id: state.fileId || genId(),
+      name: state.fileName || '工作簿.xlsx',
+      bytes: bytes,
+      images: JSON.stringify(state.images),
+      cbs: JSON.stringify(setsToObj(state.checkboxSets)),
+      style: JSON.stringify(state.origStyle || { styles: null, theme: null, sheetS: {} }),
+      updatedAt: Date.now()
+    };
+    dbPut(rec).then(function () { state.fileId = rec.id; });
+  }).catch(function () { /* 存储失败不影响编辑 */ });
+}
+function schedulePersist() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(persistNow, 800);
+}
+
+/* ---------- 首页（文件库列表：打开 / 删除 / 添加） ---------- */
+function renderHome() {
+  dbGetAll().then(function (list) {
+    list.sort(function (a, b) { return b.updatedAt - a.updatedAt; });
+    var box = $('fileList');
+    box.innerHTML = '';
+    if (!list.length) {
+      box.innerHTML = '<div class="home-empty">还没有保存的表格<br>点右下角「＋ 添加 Excel」导入第一个表格<br><br>导入后会自动识别红色表头列为待填写项，<br>填完自动保存在这里，随时打开继续填</div>';
+      return;
+    }
+    for (var i = 0; i < list.length; i++) {
+      (function (rec) {
+        var item = document.createElement('div');
+        item.className = 'file-item';
+        var d = new Date(rec.updatedAt);
+        var timeStr = d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+          String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        item.innerHTML =
+          '<button class="fi-del" data-id="' + rec.id + '">✕</button>' +
+          '<div class="fi-name"></div>' +
+          '<div class="fi-meta">更新于 ' + timeStr + '</div>' +
+          '<div class="fi-actions">' +
+          '<button class="fi-btn open" data-id="' + rec.id + '">📂 打开</button>' +
+          '<button class="fi-btn del" data-id="' + rec.id + '">🗑 删除</button>' +
+          '</div>';
+        item.querySelector('.fi-name').textContent = rec.name;
+        box.appendChild(item);
+      })(list[i]);
+    }
+  });
+}
+function deleteSaved(id, name) {
+  showConfirm('删除表格', '确定从文件库删除「' + name + '」吗？设备上的原文件不受影响。',
+    function () { dbDelete(id).then(renderHome); }, '删除', true);
+}
+/** 打开文件库中保存的工作副本（文本/图片/复选框/样式/下拉全部恢复） */
+function openSaved(id) {
+  dbGet(id).then(function (rec) {
+    if (!rec) { toast('记录不存在'); return; }
+    showLoading('正在打开…');
+    try {
+      var wb = XLSX.read(rec.bytes, { type: 'array', cellStyles: true, cellText: true, cellNF: true });
+      // 保存副本里已含样式与下拉，重新提取以便再次导出时不丢
+      var prep = (typeof JSZip !== 'undefined')
+        ? extractOrigParts(rec.bytes, wb.SheetNames).catch(function () { return null; })
+        : Promise.resolve(null);
+      prep.then(function (orig) {
+        initStateFromWb(wb, rec.name, rec, orig);
+        hideLoading();
+        enterWorkflow();
+      });
+    } catch (e) { hideLoading(); toast('打开失败：文件数据损坏'); }
+  });
+}
+/** 载入工作簿后的公共状态初始化（导入与打开共用） */
+function initStateFromWb(wb, name, rec, orig) {
+  state.wb = wb;
+  state.fileName = name;
+  state.fileId = (rec && rec.id) || genId();
+  state.sheetNames = wb.SheetNames;
+  state.checkboxSets = {};
+  state.images = {};
+  state.origStyle = orig || null;
+  try {
+    if (rec && rec.images) {
+      var im = JSON.parse(rec.images);
+      for (var n in im) for (var a in im[n]) {
+        if (!state.images[n]) state.images[n] = {};
+        state.images[n][a] = im[n][a];
+      }
+    }
+    if (rec && rec.cbs) {
+      var cb = JSON.parse(rec.cbs);
+      for (var n2 in cb) state.checkboxSets[n2] = new Set(cb[n2]);
+    }
+    if (rec && rec.style) {
+      var st = JSON.parse(rec.style);
+      if (st && (st.styles || st.theme || st.sheetS)) state.origStyle = st;
+    }
+    if (orig && orig.dvs) {
+      for (var n3 in orig.dvs) {
+        var ws0 = state.wb.Sheets[n3];
+        if (ws0) ws0['!dataValidation'] = orig.dvs[n3];
+      }
+    }
+  } catch (e) { /* 恢复失败不阻塞 */ }
+  state.undoStack = [];
+  state.redoStack = [];
+  state.sel = { r: -1, c: -1 };
+  state.range = null; state.rangePick = null;
+  state.rangeMode = false; state.pickForImage = false;
+  state.search = { active: false, term: '', results: [], index: -1, matchSet: {}, curKey: null };
+  state.inv = null;
+  state.fillDraft = {}; // 填写页未保存输入的草稿
+  restoreDraftBackup(); // 若上次编辑时被系统杀进程，恢复未保存的填写内容
+  layoutCache.clear();
+  cellEls.forEach(function (en) { en.el.remove(); });
+  cellEls.clear();
+  state.activeSheet = wb.SheetNames[0];
+  $('uploadScreen').hidden = true;
+  $('homeScreen').hidden = true;
+  $('fileName').textContent = name;
+  $('gridScroll').scrollTop = 0;
+  $('gridScroll').scrollLeft = 0;
+  renderTabs();
+  updateUndoButtons();
+  renderGrid();
+}
+/** 载入后决定进入盘点模式还是通用表格 */
+function enterWorkflow() {
+  var inv = detectFillCols();
+  if (inv) {
+    state.inv = inv;
+    $('mainScreen').hidden = true;
+    $('invScreen').hidden = false;
+    renderInv();
+    toast('已识别 ' + (inv.photoCols.length ? '填写列与拍照列' : '待填写列') + '，进入盘点模式');
+  } else {
+    $('mainScreen').hidden = false;
+    $('invScreen').hidden = true;
+  }
+}
+
+/* ---------- 红色表头列检测（红色填充 = 需要填写的列） ---------- */
+function isRedFill(cell) {
+  if (!cell || !cell.s) return false;
+  // SheetJS 可能把 fill 摊平到 cell.s 顶层（patternType/fgColor 直接在 s 上），
+  // 也可能是嵌套的 cell.s.fill 结构——两者都兼容
+  var s = cell.s, fill = s.fill || s;
+  if (fill.patternType !== 'solid' && !(fill.patternType == null && fill.fgColor)) return false;
+  var rgb = fill.fgColor && fill.fgColor.rgb;
+  if (!rgb || rgb.length < 6) return false;
+  var R = parseInt(rgb.slice(rgb.length - 6, rgb.length - 4), 16);
+  var G = parseInt(rgb.slice(rgb.length - 4, rgb.length - 2), 16);
+  var B = parseInt(rgb.slice(rgb.length - 2), 16);
+  return R >= 170 && G <= 120 && B <= 120;
+}
+function cellTxt(ws, r, c) {
+  var cell = ws[rcToAddr(r, c)];
+  if (!cell) return '';
+  return cell.w != null ? String(cell.w) : (cell.v != null ? String(cell.v) : '');
+}
+/** 检测第一个含红色单元格的行作为表头行，红色列 = 待填写列 */
+function detectFillCols() {
+  if (!state.wb) return null;
+  var name = state.sheetNames[0];
+  var ws = state.wb.Sheets[name];
+  if (!ws || !ws['!ref']) return null;
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  var headerRow = -1, fillCols = [];
+  for (var r = R.s.r; r <= Math.min(R.e.r, 20); r++) {
+    var reds = [];
+    for (var c = R.s.c; c <= R.e.c; c++) {
+      if (isRedFill(ws[rcToAddr(r, c)])) reds.push(c);
+    }
+    if (reds.length) { headerRow = r; fillCols = reds; break; }
+  }
+  if (headerRow < 0) return null;
+  var cols = [], photoCols = [];
+  for (var k = 0; k < fillCols.length; k++) {
+    var hdr = cellTxt(ws, headerRow, fillCols[k]);
+    var isPhoto = /图片|照片|拍照/.test(hdr);
+    cols.push({ c: fillCols[k], header: hdr, isPhoto: isPhoto });
+    if (isPhoto) photoCols.push(fillCols[k]);
+  }
+  // 数据行：表头行以下、任一填写列或其所在行第一列非空的行
+  var rows = [];
+  for (var r2 = headerRow + 1; r2 <= R.e.r; r2++) {
+    var has = false;
+    for (var c2 = R.s.c; c2 <= R.e.c; c2++) { if (cellTxt(ws, r2, c2) !== '') { has = true; break; } }
+    if (has) rows.push(r2);
+  }
+  var inv = { sheet: name, headerRow: headerRow, cols: cols, photoCols: photoCols, rows: rows };
+  ensurePickValidations(inv); // 给可点选列写入下拉选项（数据验证），导出后在电脑上也能下拉选择
+  return inv;
+}
+
+/* ---------- 盘点模式 ---------- */
+var PICK_HDRS = ['使用状况', '记录状况'];          // 可点选选项的字段（表头含这些词）
+var PICK_OPTIONS = {                                 // 可点选字段的固定选项（用户指定，一定出现）
+  '使用状况': ['在用', '闲置', '报废', '未见'],
+  '记录状况': ['完好', '较为完好', '损坏']
+};
+/**
+ * 提取可点选字段的选项：仅「使用状况」「记录状况」类字段（表头含这些词）才给选项，
+ * 选项 = 固定选项 + 该列（表头行以下）已有的不同内容（去重后追加在固定选项后面）。
+ * 其余字段一律无选项（自由输入）。
+ */
+function buildPickOptions(inv, c) {
+  var hdr = '';
+  for (var j = 0; j < inv.cols.length; j++) if (inv.cols[j].c === c) hdr = inv.cols[j].header;
+  var kind = '';
+  for (var k = 0; k < PICK_HDRS.length; k++) if (hdr.indexOf(PICK_HDRS[k]) >= 0) { kind = PICK_HDRS[k]; break; }
+  if (!kind || !PICK_OPTIONS[kind]) return [];
+  var set = PICK_OPTIONS[kind].slice();
+  var seen = {};
+  for (var i = 0; i < set.length; i++) seen[set[i]] = 1;
+  var ws = state.wb.Sheets[inv.sheet];
+  for (var m = 0; m < inv.rows.length; m++) {
+    var v = cellTxt(ws, inv.rows[m], c);
+    if (v !== '' && !seen[v]) { seen[v] = 1; set.push(v); }
+  }
+  return set;
+}
+/**
+ * 给可点选字段所在列写入 Excel 下拉选项（数据验证）：
+ * 选项与问卷页一致（固定选项 + 列内已有值），覆盖全部数据行。
+ * 幂等：重复进入/打开已保存副本时先移除本列旧下拉再写入，避免叠加。
+ * 原文件里若本列与其它列共用一条下拉（如 T 列与 AB 列），替换时保留其它列的区域不丢。
+ */
+/**
+ * 判断原下拉的某个区域是否值得保留：
+ * 红色待填列里只有「使用状况/记录状况」这类可选项字段要有下拉，
+ * 其它红色列（如实际使用部门）不再保留原下拉——导出文件里不要出现多余的下拉键。
+ * 非红色普通数据列的原下拉一律保留。
+ */
+function keepRegionDv(inv, region) {
+  var m = /^([A-Z]+)\d+/.exec(region);
+  if (!m) return true;
+  var p0 = addrToRC(m[1] + '1');
+  if (!p0) return true;
+  if (!inv.cols.some(function (x) { return x.c === p0.c; })) return true; // 非红色列：保留原下拉
+  return buildPickOptions(inv, p0.c).length > 0; // 红色列：只有可选项字段保留
+}
+function ensurePickValidations(inv) {
+  var ws = state.wb.Sheets[inv.sheet];
+  if (!ws || !inv.rows.length) return;
+  var minR = Math.min.apply(null, inv.rows), maxR = Math.max.apply(null, inv.rows);
+  var dvs = ws['!dataValidation'] || (ws['!dataValidation'] = []);
+  for (var k = 0; k < inv.cols.length; k++) {
+    var col = inv.cols[k];
+    var opts = buildPickOptions(inv, col.c);
+    if (!opts.length) continue;
+    var sqref = colName(col.c) + (minR + 1) + ':' + colName(col.c) + (maxR + 1);
+    var colPat = new RegExp('^' + colName(col.c) + '\\d+:');
+    var keptOthers = []; // 原下拉里非本列的区域（其它列与本列共用同一条下拉）
+    for (var j = dvs.length - 1; j >= 0; j--) {
+      var dv = dvs[j];
+      if (!dv || dv.type !== 'list') continue;
+      var parts = String(dv.sqref || '').split(/\s+/);
+      var mine = false, rest = [];
+      for (var p = 0; p < parts.length; p++) {
+        if (colPat.test(parts[p])) mine = true; else if (parts[p]) rest.push(parts[p]);
+      }
+      if (mine) {
+        for (var p2 = 0; p2 < rest.length; p2++) {
+          if (keepRegionDv(inv, rest[p2])) keptOthers.push({ formula1: dv.formula1, sqref: rest[p2], allowBlank: dv.allowBlank, showDropDown: dv.showDropDown });
+        }
+        dvs.splice(j, 1);
+      }
+    }
+    for (var q = 0; q < keptOthers.length; q++) {
+      dvs.push({ type: 'list', allowBlank: keptOthers[q].allowBlank !== false, showDropDown: keptOthers[q].showDropDown !== false, formula1: keptOthers[q].formula1, sqref: keptOthers[q].sqref });
+    }
+    dvs.push({ type: 'list', allowBlank: true, showDropDown: true, formula1: '"' + opts.join(',') + '"', sqref: sqref });
+  }
+}
+/** 该行填写完成度 */
+function invRowStatus(r) {
+  var inv = state.inv, ws = state.wb.Sheets[inv.sheet];
+  var filled = 0, total = inv.cols.length, photos = 0;
+  for (var k = 0; k < inv.cols.length; k++) {
+    var col = inv.cols[k];
+    if (col.isPhoto) {
+      var arr = state.images[inv.sheet] && state.images[inv.sheet][rcToAddr(r, col.c)];
+      if (arr && arr.length) { filled++; photos += arr.length; }
+    } else if (cellTxt(ws, r, col.c) !== '') filled++;
+  }
+  return { filled: filled, total: total, photos: photos };
+}
+/** 渲染盘点列表（每行一张卡片） */
+function renderInv() {
+  var inv = state.inv;
+  if (!inv) return;
+  $('invTitle').textContent = state.fileName || '盘点';
+  $('invSub').textContent = inv.rows.length + ' 条记录 · ' + inv.cols.length + ' 个填写项';
+  var box = $('invList');
+  box.innerHTML = '';
+  var ws = state.wb.Sheets[inv.sheet];
+  // 字段选择器：表头全部列（跳过拍照列）
+  var sel = $('invFieldSel');
+  sel.innerHTML = '';
+  var headers = [];
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  for (var c = R.s.c; c <= R.e.c; c++) {
+    var h = cellTxt(ws, inv.headerRow, c);
+    if (h !== '' && inv.photoCols.indexOf(c) < 0) headers.push({ c: c, h: h });
+  }
+  for (var hk = 0; hk < headers.length; hk++) {
+    var op = document.createElement('option');
+    op.value = String(headers[hk].c);
+    op.textContent = headers[hk].h;
+    sel.appendChild(op);
+  }
+  // 行卡片
+  for (var i = 0; i < inv.rows.length; i++) {
+    (function (r) {
+      var st = invRowStatus(r);
+      var no = cellTxt(ws, r, R.s.c);
+      var nameTxt = '';
+      for (var k2 = 1; k2 < Math.min(6, R.e.c + 1); k2++) { // 第 2 列起找资产名称等描述
+        var v2 = cellTxt(ws, r, R.s.c + k2);
+        if (v2 !== '') { nameTxt = v2; break; }
+      }
+      var card = document.createElement('div');
+      card.className = 'inv-card';
+      card.dataset.r = r;
+      card.innerHTML =
+        '<div class="ic-line1"><span class="ic-no"></span><span class="ic-badge ' + (st.filled >= st.total ? 'done' : 'todo') + '">' +
+        (st.filled >= st.total ? '✓ 已完成' : st.filled + '/' + st.total + ' 项') + '</span></div>' +
+        '<div class="ic-name"></div><div class="ic-fields"></div>';
+      card.querySelector('.ic-no').textContent = no !== '' ? no : '第 ' + (r + 1) + ' 行';
+      card.querySelector('.ic-name').textContent = nameTxt;
+      var chipBox = card.querySelector('.ic-fields');
+      for (var k3 = 0; k3 < inv.cols.length; k3++) {
+        var col = inv.cols[k3];
+        var chip = document.createElement('span');
+        if (col.isPhoto) {
+          var ph = st.photos;
+          chip.className = 'ic-chip' + (ph ? ' photo' : '');
+          chip.textContent = '📷 照片' + (ph ? ' ×' + ph : '');
+        } else {
+          var v3 = cellTxt(ws, r, col.c);
+          chip.className = 'ic-chip' + (v3 !== '' ? ' filled' : '');
+          chip.textContent = col.header + '：' + (v3 !== '' ? v3 : '待填');
+        }
+        chipBox.appendChild(chip);
+      }
+      box.appendChild(card);
+    })(inv.rows[i]);
+  }
+  if (!inv.rows.length) $('invList').innerHTML = '<div class="home-empty">表格中没有数据行</div>';
+}
+
+/* ---------- 填写页（问卷式盘点：每字段一个问题） ---------- */
+function openFillPage(r) {
+  var inv = state.inv;
+  if (!inv) return;
+  var ws = state.wb.Sheets[inv.sheet];
+  state.inv.cur = r;
+  var idx = inv.rows.indexOf(r);
+  var no = cellTxt(ws, r, XLSX.utils.decode_range(ws['!ref']).s.c);
+  // 完成度
+  var st = invRowStatus(r);
+  $('fillTitle').textContent = '记录 ' + (idx + 1) + ' / ' + inv.rows.length + '（已填 ' + st.filled + '/' + st.total + '）';
+  $('fillSub').textContent = no || ('第 ' + (r + 1) + ' 行');
+  var html = '';
+  // 顶部：被盘点物品信息（按表头关键词显示：型号 / 存放地点 / 使用状况 / 使用部门名称，供对照）
+  var infoParts = [];
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  var INFO_KEYS = ['型号', '存放地点', '使用状况', '使用部门名称'];
+  for (var ki = 0; ki < INFO_KEYS.length; ki++) {
+    var kw = INFO_KEYS[ki];
+    for (var c = R.s.c; c <= R.e.c; c++) {
+      if (inv.cols.some(function (x) { return x.c === c; })) continue; // 跳过红色待填列（如「实际使用状况」）
+      var h = cellTxt(ws, inv.headerRow, c);
+      if (h.indexOf(kw) < 0) continue;
+      var v = cellTxt(ws, r, c);
+      infoParts.push('<b>' + escHtml(h) + '</b>：' + escHtml(v || '（未填）'));
+      break; // 每个关键词只取第一个匹配列
+    }
+  }
+  if (infoParts.length) html += '<div class="fill-sec"><div class="fs-label">📄 ' + (no || '本记录') + '</div><div class="fs-info">' + infoParts.join('　') + '</div></div>';
+  // 每个填写字段 = 一道问卷题
+  var qNo = 0;
+  for (var k = 0; k < inv.cols.length; k++) {
+    var col = inv.cols[k];
+    qNo++;
+    var addr = rcToAddr(r, col.c);
+    // 草稿优先：还没点「保存」的输入也不能丢（拍照/切换记录会重绘页面）
+    var cur = (state.fillDraft && state.fillDraft[addr] !== undefined) ? state.fillDraft[addr] : cellTxt(ws, r, col.c);
+    html += '<div class="fill-sec"><div class="fs-label">' + qNo + '. ' + escHtml(col.header) +
+      (cur !== '' && !col.isPhoto ? ' <span class="q-done">✓ 已答</span>' : '') + '</div>';
+    if (col.isPhoto) {
+      var arr = state.images[inv.sheet] && state.images[inv.sheet][addr] || [];
+      html += '<div class="fs-photos">';
+      for (var p = 0; p < arr.length; p++) {
+        html += '<div class="ph-wrap"><img src="' + arr[p].dataUrl + '"><button class="ph-del" data-addr="' + addr + '" data-idx="' + p + '">✕</button></div>';
+      }
+      html += '</div><button class="ph-btn" id="btnPhoto_' + addr + '">📷 拍照（第 ' + (arr.length + 1) + ' 张）</button>';
+      html += '<div class="fs-info">可连续拍多张，互不覆盖</div>';
+    } else {
+      var opts = buildPickOptions(inv, col.c);
+      if (opts.length) {
+        html += '<div class="fs-opts">';
+        for (var o = 0; o < opts.length; o++) {
+          html += '<button class="opt-btn' + (cur === opts[o] ? ' on' : '') + '" data-addr="' + addr + '" data-val="' + escAttr(opts[o]) + '">' + escHtml(opts[o]) + '</button>';
+        }
+        html += '</div>';
+      }
+      html += '<textarea id="fi_' + addr + '" rows="2" placeholder="' + (opts.length ? '点上方选项，或直接输入' : '请输入内容') + '">' + escHtml(cur) + '</textarea>';
+    }
+    html += '</div>';
+  }
+  $('fillBody').innerHTML = html;
+  $('fillMask').hidden = false;
+}
+
+/** 填写页选项按钮 / 照片删除（事件委托） */
+function fillBodyAction(target) {
+  var inv = state.inv;
+  if (!inv) return;
+  if (target.classList.contains('opt-btn')) {
+    var addr = target.dataset.addr, val = target.dataset.val;
+    var input = $('fi_' + addr);
+    if (input) { input.value = val; }
+    if (!state.fillDraft) state.fillDraft = {};
+    state.fillDraft[addr] = val; // 选项也进草稿，拍照/切页不丢
+    backupDraft();
+    var btns = $('fillBody').querySelectorAll('.opt-btn');
+    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('on', btns[i] === target);
+  } else if (target.classList.contains('ph-del')) {
+    showConfirm('删除照片', '确定删除这张照片吗？（可撤销）',
+      function () { flushFillDraft(); removeImage(inv.sheet, target.dataset.addr, parseInt(target.dataset.idx, 10)); openFillPage(inv.cur); }, '删除', true);
+  } else if (target.id && target.id.indexOf('btnPhoto_') === 0) {
+    state.pendingPhotoAddr = target.id.slice('btnPhoto_'.length);
+    $('filePhoto').click();
+  }
+}
+
+/* ---------- 未保存草稿的同步本地备份（防相机把浏览器杀掉后丢内容） ---------- */
+var LS_DRAFT_KEY = 'inv-fill-draft-v4';
+/** 把当前填写草稿同步写进 localStorage（同步写入，页面被杀也不丢） */
+function backupDraft() {
+  try {
+    var inv = state.inv;
+    if (!inv || !inv.sheet) return;
+    var d = state.fillDraft || {};
+    if (!Object.keys(d).length) { localStorage.removeItem(LS_DRAFT_KEY); return; }
+    localStorage.setItem(LS_DRAFT_KEY, JSON.stringify({ name: state.fileName || '', sheet: inv.sheet, d: d }));
+  } catch (e) { /* 私密模式等不可用则跳过 */ }
+}
+function clearDraftBackup() {
+  try { localStorage.removeItem(LS_DRAFT_KEY); } catch (e) { /* 忽略 */ }
+}
+/** 重开同一文件时恢复被杀前未保存的草稿（文件名与工作表名都匹配才恢复） */
+function restoreDraftBackup() {
+  try {
+    var s = localStorage.getItem(LS_DRAFT_KEY);
+    if (!s) return;
+    var b = JSON.parse(s);
+    if (!b || !b.d || b.name !== (state.fileName || '')) return;
+    if (state.wb && state.wb.Sheets[b.sheet]) state.fillDraft = b.d;
+  } catch (e) { /* 忽略 */ }
+}
+
+/**
+ * 把填写页当前行的草稿直接写进表格（不产生撤销步）。
+ * 拍照、切换记录、返回列表前调用：配合自动保存，即使手机浏览器被系统杀掉重开，
+ * 已填内容也已持久化，不会消失。
+ */
+function flushFillDraft() {
+  var inv = state.inv;
+  if (!inv || inv.cur == null) return;
+  var ws = state.wb.Sheets[inv.sheet];
+  var d = state.fillDraft || {};
+  var changed = false;
+  for (var addr in d) {
+    if (!/^[A-Z]+\d+$/.test(addr)) continue;
+    var p = addrToRC(addr);
+    if (!p || p.r !== inv.cur) continue;
+    var v = d[addr];
+    var cur = cellTxt(ws, p.r, p.c);
+    if (v === cur) continue;
+    extendRef(ws, p.r, p.c);
+    if (v === '') delete ws[addr];
+    else if (/^\d+(\.\d+)?$/.test(v)) ws[addr] = { t: 'n', v: parseFloat(v), w: v };
+    else ws[addr] = { t: 's', v: v };
+    changed = true;
+  }
+  if (changed) persistNow(); // 立即持久化（相机可能杀掉页面，不等防抖）
+  backupDraft(); // 同步备份草稿，进程被杀后重开也能恢复
+}
+
+/** 保存填写页：一次操作写入全部文本字段（一个撤销步） */
+function saveFillPage() {
+  var inv = state.inv;
+  if (!inv) return;
+  var r = inv.cur, ws = state.wb.Sheets[inv.sheet];
+  var addrs = [], values = [];
+  for (var k = 0; k < inv.cols.length; k++) {
+    var col = inv.cols[k];
+    if (col.isPhoto) continue;
+    var addr = rcToAddr(r, col.c);
+    var input = $('fi_' + addr);
+    if (!input) continue;
+    var v = input.value;
+    var cur = cellTxt(ws, r, col.c);
+    if (v === cur) continue;
+    addrs.push(addr); values.push(v);
+  }
+  if (!addrs.length) { $('fillMask').hidden = true; renderInv(); toast('没有需要保存的改动'); schedulePersist(); state.fillDraft = {}; return; }
+  var before = snapCells(inv.sheet, addrs);
+  for (var i = 0; i < addrs.length; i++) {
+    var p = addrToRC(addrs[i]);
+    extendRef(ws, p.r, p.c);
+    if (values[i] === '') delete ws[addrs[i]];
+    else if (/^\d+(\.\d+)?$/.test(values[i])) ws[addrs[i]] = { t: 'n', v: parseFloat(values[i]), w: values[i] };
+    else ws[addrs[i]] = { t: 's', v: values[i] };
+  }
+  var after = snapCells(inv.sheet, addrs);
+  pushOp('盘点填写第 ' + (r + 1) + ' 行',
+    function () { restoreSnap(inv.sheet, before); },
+    function () { restoreSnap(inv.sheet, after); });
+  $('fillMask').hidden = true;
+  renderInv();
+  afterOp('已保存第 ' + (r + 1) + ' 行，并已自动保存');
+  persistNow(); // 立即自动保存进文件库（不等防抖）
+  state.fillDraft = {}; // 保存成功后清空草稿
+  clearDraftBackup();
+  // 不自动弹分享框（用户要求：保存即静默自动保存）；需要分享时点顶部「⬇ 保存分享」
+}
+
+/* ---------- 盘点搜索：按表头字段 + 自动补全 ---------- */
+var invSuggestTimer = null;
+function invSearch() {
+  clearTimeout(invSuggestTimer);
+  invSuggestTimer = setTimeout(function () {
+    var inv = state.inv;
+    if (!inv) return;
+    var term = $('invSearchInput').value.trim();
+    var box = $('invSuggest');
+    if (term === '') { box.style.display = 'none'; return; }
+    var c = parseInt($('invFieldSel').value, 10);
+    var ws = state.wb.Sheets[inv.sheet];
+    var rowsByVal = {};
+    for (var i = 0; i < inv.rows.length; i++) {
+      var v = cellTxt(ws, inv.rows[i], c);
+      if (v !== '' && v.toLowerCase().indexOf(term.toLowerCase()) >= 0) {
+        if (!rowsByVal[v]) rowsByVal[v] = [];
+        rowsByVal[v].push(inv.rows[i]);
+      }
+    }
+    var vals = Object.keys(rowsByVal).slice(0, 20);
+    if (!vals.length) { box.style.display = 'none'; return; }
+    box.innerHTML = '';
+    for (var k = 0; k < vals.length; k++) {
+      (function (v) {
+        var it = document.createElement('div');
+        it.className = 'sg-item';
+        it.textContent = v;
+        it.addEventListener('click', function () {
+          box.style.display = 'none';
+          $('invSearchInput').value = v;
+          state.inv.cur = rowsByVal[v][0];
+          openFillPage(rowsByVal[v][0]);
+        });
+        box.appendChild(it);
+      })(vals[k]);
+    }
+    box.style.display = 'block';
+  }, 250);
+}
+
+/* ---------- 保存并分享到微信（系统分享面板） ---------- */
+function shareOrDownload(buf) {
+  var blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  var name = exportName();
+  var file = new File([blob], name, { type: blob.type });
+  var canShare = false;
+  try { canShare = !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { canShare = false; }
+  if (!canShare) { try { canShare = !!navigator.share; } catch (e) { canShare = false; } } // 部分浏览器无 canShare 但 share 可用
+  if (canShare) {
+    try {
+      navigator.share({ files: [file], title: name, text: name }).then(function () {
+        toast('已发送，请在打开的分享面板中选择「微信」');
+      }).catch(function (e) {
+        if (e && e.name === 'AbortError') { toast('已取消分享'); return; }
+        showDownloadHelp(blob, name); // 系统分享失败（如页面停留过久失去手势授权）→ 兜底下载
+      });
+    } catch (e) {
+      showDownloadHelp(blob, name);
+    }
+  } else {
+    showDownloadHelp(blob, name);
+  }
+}
+/** 不支持系统分享的浏览器（微信内置浏览器等）的兜底：下载按钮 + 换浏览器指引 */
+function showDownloadHelp(blob, name) {
+  showConfirm('文件已生成 ✅',
+    '当前浏览器无法直接调起分享面板（微信内置浏览器通常如此）。\n\n' +
+    '文件「' + name + '」已生成完毕，请任选一种方式发送：\n' +
+    '① 点下方「下载文件」保存到手机；\n' +
+    '② 在微信里点右上角「···」→「在浏览器打开」后再点「保存分享」；\n' +
+    '③ 建议直接用手机自带浏览器（Safari / 浏览器）打开这个网页，点「保存分享」即可直接选择微信发送。',
+    function () { downloadBlob(blob, name); }, '下载文件');
+}
+
+/* ---------- 界面切换 ---------- */
+function goHome() {
+  schedulePersist();
+  state.inv = null;
+  $('mainScreen').hidden = true;
+  $('invScreen').hidden = true;
+  $('fillMask').hidden = true;
+  $('homeScreen').hidden = false;
+  renderHome();
+}
+function enterInventoryMode() {
+  var inv = detectFillCols();
+  if (!inv) { toast('未检测到红色表头列，无法进入盘点模式（可在通用表格中编辑）'); return; }
+  state.inv = inv;
+  $('mainScreen').hidden = true;
+  $('invScreen').hidden = false;
+  renderInv();
+}
+function backToTable() {
+  state.inv = null;
+  $('invScreen').hidden = true;
+  $('mainScreen').hidden = false;
+  renderGrid();
+}
+
+/* ================================================================
+ * 十二、初始化与事件绑定
+ * ================================================================ */
+function initApp() {
+  /* --- 上传 --- */
+  $('btnPickFile').addEventListener('click', function () { $('fileXlsx').click(); });
+  $('btnHelp').addEventListener('click', openHelp);
+  $('btnHelpTop').addEventListener('click', openHelp);
+  $('fileXlsx').addEventListener('change', function () {
+    var f = $('fileXlsx').files && $('fileXlsx').files[0];
+    $('fileXlsx').value = '';
+    if (!f) return;
+    if (f.size > 50 * 1024 * 1024) {
+      showConfirm('文件较大', '该文件超过 50MB，手机浏览器可能卡顿甚至崩溃，确定继续加载吗？',
+        function () { loadFile(f); }, '继续加载', true);
+      return;
+    }
+    // 当前表格已自动保存在文件库中，直接导入新文件即可
+    loadFile(f);
+  });
+
+  /* --- 首页文件库 --- */
+  $('btnAddFile').addEventListener('click', function () { $('fileXlsx').click(); });
+  $('fileList').addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('[data-id]') : null;
+    if (!b) return;
+    var id = b.dataset.id;
+    if (b.classList.contains('del')) {
+      var nameEl = b.closest('.file-item');
+      var nm = nameEl && nameEl.querySelector('.fi-name');
+      deleteSaved(id, nm ? nm.textContent : '');
+    } else openSaved(id);
+  });
+
+  /* --- 顶栏切换 --- */
+  $('btnHome').addEventListener('click', goHome);
+  $('btnInvMode').addEventListener('click', enterInventoryMode);
+
+  /* --- 盘点模式 --- */
+  $('btnInvBack').addEventListener('click', goHome);
+  $('btnInvTable').addEventListener('click', backToTable);
+  $('btnInvShare').addEventListener('click', openExportConfirm);
+  $('invFieldSel').addEventListener('change', function () { invSearch(); });
+  $('invSearchInput').addEventListener('input', invSearch);
+  $('invSearchInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      var box = $('invSuggest');
+      var first = box.querySelector('.sg-item');
+      if (first) first.click();
+    }
+  });
+  $('invList').addEventListener('click', function (e) {
+    var card = e.target.closest ? e.target.closest('.inv-card') : null;
+    if (card) openFillPage(parseInt(card.dataset.r, 10));
+  });
+
+  /* --- 填写页 --- */
+  $('btnFillBack').addEventListener('click', function () {
+    flushFillDraft(); // 未保存的输入先落进表格，返回列表也不丢
+    $('fillMask').hidden = true;
+    renderInv();
+  });
+  $('btnFillPrev').addEventListener('click', function () {
+    var inv = state.inv;
+    if (!inv) return;
+    flushFillDraft();
+    var idx = inv.rows.indexOf(inv.cur);
+    openFillPage(inv.rows[(idx - 1 + inv.rows.length) % inv.rows.length]);
+  });
+  $('btnFillNext').addEventListener('click', function () {
+    var inv = state.inv;
+    if (!inv) return;
+    flushFillDraft();
+    var idx = inv.rows.indexOf(inv.cur);
+    openFillPage(inv.rows[(idx + 1) % inv.rows.length]);
+  });
+  $('btnFillSave').addEventListener('click', saveFillPage);
+  $('fillBody').addEventListener('click', function (e) { fillBodyAction(e.target); });
+  // 填写页输入实时进草稿：拍照、切换记录、删除照片等重绘操作都不会丢未保存的内容
+  $('fillBody').addEventListener('input', function (e) {
+    var t = e.target;
+    if (t && t.id && t.id.indexOf('fi_') === 0) {
+      if (!state.fillDraft) state.fillDraft = {};
+      state.fillDraft[t.id.slice(3)] = t.value;
+      backupDraft(); // 每打一个字就同步备份，进程被杀也不丢
+    }
+  });
+
+  /* --- 盘点拍照（可连续多张，追加不覆盖） --- */
+  $('filePhoto').addEventListener('change', function () {
+    var f = $('filePhoto').files && $('filePhoto').files[0];
+    $('filePhoto').value = '';
+    var addr = state.pendingPhotoAddr;
+    state.pendingPhotoAddr = null;
+    if (!f || !addr || !state.inv) return;
+    flushFillDraft(); // 拍照前先把未保存的输入落进表格（相机可能杀掉页面，先持久化）
+    showLoading('正在处理照片…');
+    loadImageFile(f).then(function (img) {
+      hideLoading();
+      setImage(state.inv.sheet, addr, img);
+      if (state.inv.cur != null) openFillPage(state.inv.cur); // 刷新缩略图
+    }).catch(function (err) {
+      hideLoading();
+      toast(err);
+    });
+  });
+
+  /* --- 搜索 --- */
+  var searchTimer = null;
+  $('searchInput').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { doSearch($('searchInput').value); }, 350);
+  });
+  $('searchInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); gotoResult(1); }
+  });
+  $('btnNext').addEventListener('click', function () { gotoResult(1); });
+  $('btnPrev').addEventListener('click', function () { gotoResult(-1); });
+  $('btnCloseSearch').addEventListener('click', clearSearch);
+
+  /* --- 工具栏 --- */
+  $('btnUndo').addEventListener('click', undo);
+  $('btnRedo').addEventListener('click', redo);
+  $('btnRangeMode').addEventListener('click', function () { state.rangeMode ? exitRangeMode() : enterRangeMode(); });
+  $('btnRangeCancel').addEventListener('click', function () { state.pickForImage = false; exitRangeMode(); renderGrid(); });
+  $('btnFill').addEventListener('click', function () {
+    if (!state.range) state.range = selAsRange();
+    openRangePanel();
+  });
+  $('btnCheckbox').addEventListener('click', function () {
+    if (!state.range) state.range = selAsRange();
+    openRangePanel();
+  });
+  $('btnClear').addEventListener('click', function () {
+    var tgt = state.range || selAsRange();
+    if (!tgt) { toast('请先点击选择单元格，或点击行/列标题选择范围'); return; }
+    var n = rangeCount(tgt);
+    showConfirm('清空内容', '确定清空 ' + n + ' 个单元格的内容吗？可通过「撤销」恢复。',
+      function () { clearCells(state.activeSheet, rangeAddrs(tgt)); }, '清空', true);
+  });
+  $('btnImage').addEventListener('click', function () {
+    if (state.sel.r >= 0) { pickImageForCell(state.sel.r, state.sel.c); return; }
+    state.pickForImage = true;
+    state.rangeMode = false;
+    showBanner('请点击要插入图片的单元格');
+    renderGrid();
+  });
+  $('btnExport').addEventListener('click', openExportConfirm);
+
+  /* --- 表格交互 --- */
+  $('gridScroll').addEventListener('scroll', scheduleRender, { passive: true });
+  window.addEventListener('resize', scheduleRender);
+  $('cellWindow').addEventListener('click', function (e) {
+    var cellEl = e.target.closest ? e.target.closest('.cell') : null;
+    if (!cellEl) return;
+    var key = cellEl.dataset.key;
+    var parts = key.split(',');
+    var r = parseInt(parts[0], 10), c = parseInt(parts[1], 10);
+    var name = state.activeSheet, addr = rcToAddr(r, c);
+    if (state.pickForImage) {          // 插图选点模式
+      state.pickForImage = false;
+      hideBanner();
+      pickImageForCell(r, c);
+      return;
+    }
+    if (state.rangeMode) {             // 范围选点模式
+      pickRangePoint(r, c);
+      return;
+    }
+    if (cbSetHas(name, addr)) {        // 复选框：点击切换勾选
+      toggleCheckbox(name, addr);
+      return;
+    }
+    state.sel = { r: r, c: c };        // 普通：选中并打开编辑面板
+    state.range = null;
+    renderGrid();
+    openCellPanel(addr);
+  });
+  $('hdrLeft').addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('.rcell') : null;
+    if (t) headerRowTap(parseInt(t.dataset.r, 10));
+  });
+  $('hdrTop').addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('.hcell') : null;
+    if (t) headerColTap(parseInt(t.dataset.c, 10));
+  });
+  $('hdrCorner').addEventListener('click', function () {
+    var ws = state.wb.Sheets[state.activeSheet];
+    if (!ws['!ref']) return;
+    var R = XLSX.utils.decode_range(ws['!ref']);
+    state.pickForImage = false;
+    exitRangeMode();
+    state.range = norm(R.s.r, R.s.c, R.e.r, R.e.c);
+    renderGrid();
+    openRangePanel();
+  });
+
+  /* --- 图片选择 --- */
+  $('fileImg').addEventListener('change', function () {
+    var f = $('fileImg').files && $('fileImg').files[0];
+    $('fileImg').value = '';
+    var tgt = state.pendingImgCell;
+    state.pendingImgCell = null;
+    if (!f || !tgt) return;
+    var addr = rcToAddr(tgt.r, tgt.c);
+    showLoading('正在处理图片…');
+    loadImageFile(f).then(function (img) {
+      hideLoading();
+      // 追加模式：多张图片共存，不覆盖
+      setImage(state.activeSheet, addr, img);
+    }).catch(function (err) {
+      hideLoading();
+      toast(err);
+    });
+  });
+
+  /* --- 面板与对话框 --- */
+  $('panel').addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('[data-act]') : null;
+    if (b && panelActions[b.dataset.act]) panelActions[b.dataset.act]();
+  });
+  $('panelMask').addEventListener('click', function (e) { if (e.target === $('panelMask')) closePanel(); });
+  $('modalMask').addEventListener('click', function (e) { if (e.target === $('modalMask')) hideModal(); });
+
+  /* --- 工作表标签 --- */
+  $('sheetTabs').addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.stab') : null;
+    if (b && b.dataset.name !== state.activeSheet) switchSheet(b.dataset.name);
+  });
+
+  updateUndoButtons();
+  hideBanner();
+  renderHome(); // 默认显示首页文件库
+}
+
+/* 入口（node 环境评测时不执行 DOM 逻辑） */
+if (typeof document !== 'undefined') {
+  if (typeof XLSX === 'undefined' || typeof JSZip === 'undefined') {
+    /* 两套 CDN 均加载失败：给出明确提示，避免页面无声无息 */
+    var onDom = function () { toast('组件库加载失败：请检查网络后刷新页面'); };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onDom);
+    else onDom();
+  } else if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
+  } else {
+    initApp();
+  }
+}
+</script>
+</body>
+</html>
