@@ -302,6 +302,7 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
 .home-head h1 { margin: 0; font-size: 20px; }
 .home-head p { margin: 4px 0 0; font-size: 12.5px; color: #8a94a3; }
 .home-head .home-tip { margin-top: 8px; font-size: 12px; color: #2f6bff; background: #eef3ff; border-radius: 8px; padding: 6px 10px; }
+.home-head .check-ver { margin-top: 8px; font-size: 13px; color: #fff; background: #2f6bff; border: 0; border-radius: 8px; padding: 8px 12px; }
 #fileList { flex: 1; overflow-y: auto; padding: 12px; -webkit-overflow-scrolling: touch; }
 .file-item {
   background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 10px;
@@ -437,9 +438,10 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
 <!-- ==================== 首页（文件库：添加/删除/打开） ==================== -->
 <div id="homeScreen">
   <div class="home-head">
-    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.9</span></h1>
+    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.10</span></h1>
     <p>已保存的表格都在这里，可随时打开继续填写</p>
     <p class="home-tip">💡 小技巧：浏览器菜单里点「添加到桌面」，以后像 App 一样一点就开</p>
+    <button id="btnCheckVer" class="check-ver">🔄 检查更新</button>
   </div>
   <div id="fileList"></div>
   <button id="btnAddFile">＋ 添加 Excel</button>
@@ -2775,8 +2777,27 @@ function backToTable() {
 /* ================================================================
  * 十二、初始化与事件绑定
  * ================================================================ */
+var APP_VERSION = 'v4.10';
+/** 检查更新：对比仓库里的 version.txt，提示用户是否要完全关闭后重开 */
+function checkUpdate(showAlways) {
+  try {
+    fetch('version.txt?t=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.text(); }).then(function (t) {
+      var m = /v\d+\.\d+/.exec(t || '');
+      if (!m) return;
+      if (m[0] !== APP_VERSION) {
+        toast('有新版本 ' + m[0] + '！请把 App 完全关闭后重新打开');
+      } else if (showAlways) {
+        toast('已是最新版 ' + APP_VERSION + ' ✓');
+      }
+    }).catch(function () { if (showAlways) toast('没连上网络，检查不了'); });
+  } catch (e) {}
+}
+
 function initApp() {
   /* --- 上传 --- */
+  $('verBadge').textContent = APP_VERSION;
+  $('btnCheckVer').addEventListener('click', function () { checkUpdate(true); });
+  checkUpdate(false); // 打开时静默检查，有新版本才提示
   $('btnPickFile').addEventListener('click', function () { $('fileXlsx').click(); });
   $('btnHelp').addEventListener('click', openHelp);
   $('btnHelpTop').addEventListener('click', openHelp);
