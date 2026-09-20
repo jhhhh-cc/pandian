@@ -438,7 +438,7 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
 <!-- ==================== 首页（文件库：添加/删除/打开） ==================== -->
 <div id="homeScreen">
   <div class="home-head">
-    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.10</span></h1>
+    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.11</span></h1>
     <p>已保存的表格都在这里，可随时打开继续填写</p>
     <p class="home-tip">💡 小技巧：浏览器菜单里点「添加到桌面」，以后像 App 一样一点就开</p>
     <button id="btnCheckVer" class="check-ver">🔄 检查更新</button>
@@ -1353,9 +1353,12 @@ function loadImageFile(file) {
           var cv = document.createElement('canvas');
           cv.width = Math.max(1, Math.round(w * scale));
           cv.height = Math.max(1, Math.round(h * scale));
-          cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
-          out = cv.toDataURL('image/png');
-          ext = 'png'; w = cv.width; h = cv.height;
+          var cctx = cv.getContext('2d');
+          cctx.fillStyle = '#fff';
+          cctx.fillRect(0, 0, cv.width, cv.height);
+          cctx.drawImage(im, 0, 0, cv.width, cv.height);
+          out = cv.toDataURL('image/jpeg', 0.8); // JPEG 体积约为 PNG 的十分之一，大表格也存得下
+          ext = 'jpg'; w = cv.width; h = cv.height;
         }
         res({ dataUrl: out, ext: ext, w: w, h: h, name: file.name });
       };
@@ -2091,8 +2094,14 @@ function persistNow() {
       style: JSON.stringify(state.origStyle || { styles: null, theme: null, sheetS: {} }),
       updatedAt: Date.now()
     };
-    dbPut(rec).then(function () { state.fileId = rec.id; });
-  }).catch(function () { /* 存储失败不影响编辑 */ });
+    dbPut(rec).then(function () { state.fileId = rec.id; }).catch(function () {
+      // 存储失败不再沉默：提醒用户备份和清理（30 秒内只提示一次）
+      if (!state.storageWarnedAt || Date.now() - state.storageWarnedAt > 30000) {
+        state.storageWarnedAt = Date.now();
+        toast('保存失败：手机存储空间不足。请先点「⬇ 保存分享」把表格发到微信备份，再回首页删除不再使用的旧文件');
+      }
+    });
+  }).catch(function () { /* 生成失败不影响编辑 */ });
 }
 function schedulePersist() {
   clearTimeout(persistTimer);
@@ -2149,6 +2158,7 @@ function openSaved(id) {
         initStateFromWb(wb, rec.name, rec, orig);
         hideLoading();
         enterWorkflow();
+        setTimeout(recompressHeavyImages, 2500); // 后台把老照片转成 JPEG，不阻塞打开
       });
     } catch (e) { hideLoading(); toast('打开失败：文件数据损坏'); }
   });
@@ -2356,6 +2366,44 @@ function ensurePickValidations(inv) {
     dvs.push({ type: 'list', allowBlank: true, showDropDown: true, formula1: '"' + opts.join(',') + '"', sqref: sqref });
   }
 }
+/** 老版本拍的照片存成了 PNG，体积是 JPEG 的约十倍；打开文件后后台自动转成 JPEG，大表格才能存得下 */
+function recompressHeavyImages() {
+  if (typeof Image === 'undefined' || !state.images) return;
+  var pending = 0, changed = false;
+  var sheets = Object.keys(state.images);
+  for (var s = 0; s < sheets.length; s++) {
+    var imgs = state.images[sheets[s]];
+    for (var addr in imgs) {
+      var arr = imgs[addr] || [];
+      for (var j = 0; j < arr.length; j++) {
+        (function (img) {
+          if (!img || !img.dataUrl || img.ext === 'jpg' || img.dataUrl.indexOf('data:image/jpeg') === 0) return;
+          if (img.dataUrl.length < 400 * 1024) return; // 小图不动
+          pending++;
+          var im = new Image();
+          im.onload = function () {
+            pending--;
+            try {
+              var cv = document.createElement('canvas');
+              cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+              var cctx = cv.getContext('2d');
+              cctx.fillStyle = '#fff';
+              cctx.fillRect(0, 0, cv.width, cv.height);
+              cctx.drawImage(im, 0, 0);
+              var out = cv.toDataURL('image/jpeg', 0.8);
+              if (out.length < img.dataUrl.length) { img.dataUrl = out; img.ext = 'jpg'; changed = true; }
+              schedulePersist();
+            } catch (e) {}
+            if (pending === 0 && changed) toast('已自动压缩照片，保存更快更稳');
+          };
+          im.onerror = function () { pending--; };
+          im.src = img.dataUrl;
+        })(arr[j]);
+      }
+    }
+  }
+}
+
 /** 该行填写完成度 */
 function invRowStatus(r) {
   var inv = state.inv, ws = state.wb.Sheets[inv.sheet];
@@ -2777,7 +2825,7 @@ function backToTable() {
 /* ================================================================
  * 十二、初始化与事件绑定
  * ================================================================ */
-var APP_VERSION = 'v4.10';
+var APP_VERSION = 'v4.11';
 /** 检查更新：对比仓库里的 version.txt，提示用户是否要完全关闭后重开 */
 function checkUpdate(showAlways) {
   try {
