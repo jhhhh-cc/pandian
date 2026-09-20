@@ -437,7 +437,7 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
 <!-- ==================== 首页（文件库：添加/删除/打开） ==================== -->
 <div id="homeScreen">
   <div class="home-head">
-    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.7</span></h1>
+    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.8</span></h1>
     <p>已保存的表格都在这里，可随时打开继续填写</p>
     <p class="home-tip">💡 小技巧：浏览器菜单里点「添加到桌面」，以后像 App 一样一点就开</p>
   </div>
@@ -517,6 +517,7 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
   <div class="inv-top">
     <button id="btnInvBack" class="icon-btn" title="返回表格">⌂</button>
     <div class="tb-title"><b id="invTitle">盘点</b><span id="invSub"></span></div>
+    <button id="btnInvAdd" class="tbtn small">＋ 新增行</button>
     <button id="btnInvTable" class="tbtn small">▦ 表格</button>
     <button id="btnInvShare" class="tbtn primary small">⬇ 保存分享</button>
   </div>
@@ -2366,7 +2367,61 @@ function invRowStatus(r) {
   }
   return { filled: filled, total: total, photos: photos };
 }
+/** 问卷题目列：新增行（fillAll）时返回全部列表头（所有列都要填），平时返回红色待填列 */
+function fillColsList() {
+  var inv = state.inv;
+  if (!state.fillAllCols || !inv) return inv.cols;
+  var ws = state.wb.Sheets[inv.sheet];
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  var out = [];
+  for (var c = R.s.c; c <= R.e.c; c++) {
+    var h = cellTxt(ws, inv.headerRow, c);
+    if (h !== '') out.push({ c: c, header: h, isPhoto: /图片|照片|拍照/.test(h) });
+  }
+  return out;
+}
+
 /** 渲染盘点列表（每行一张卡片） */
+/** 筛选字段：把条形码列提到首位（默认按条形码筛选），没有条形码列则保持原顺序 */
+function putBarcodeFirst(headers) {
+  for (var i = 0; i < headers.length; i++) {
+    var h = headers[i].h;
+    if (h.indexOf('条形码') >= 0 || h.indexOf('条码') >= 0) {
+      if (i > 0) { var bc = headers.splice(i, 1)[0]; headers.unshift(bc); }
+      return true;
+    }
+  }
+  return false;
+}
+
+/** 新增一行盘点记录：在最后一行下方追加空行，继承上一行样式，随后直接打开问卷填写 */
+function addInvRow() {
+  var inv = state.inv;
+  if (!inv) return;
+  var ws = state.wb.Sheets[inv.sheet];
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  var last = inv.rows.length ? inv.rows[inv.rows.length - 1] : inv.headerRow;
+  var newR = last + 1;
+  if (newR > R.e.r) { R.e.r = newR; ws['!ref'] = XLSX.utils.encode_range(R); }
+  var map = state.origStyle && state.origStyle.sheetS && state.origStyle.sheetS[inv.sheet];
+  for (var c = R.s.c; c <= R.e.c; c++) {
+    var addr = rcToAddr(newR, c), prev = rcToAddr(last, c);
+    var cell = { t: 's', v: '' };
+    var pv = ws[prev];
+    if (pv && pv.s) cell.s = pv.s; // 内存里继承上一行样式
+    if (map && map[prev]) map[addr] = map[prev]; // 导出时新行也带上一行的边框等样式
+    ws[addr] = cell;
+  }
+  state.inv = detectFillCols();
+  if (!state.inv) { state.inv = inv; return; }
+  if (state.inv.rows.indexOf(newR) < 0) state.inv.rows.push(newR);
+  ensurePickValidations(state.inv); // 下拉选项覆盖到新行
+  persistNow();
+  renderInv();
+  openFillPage(newR, true); // 直接打开问卷填写（含全部列表头）
+  toast('已新增第 ' + (newR + 1) + ' 行，开始填写');
+}
+
 function renderInv() {
   var inv = state.inv;
   if (!inv) return;
@@ -2384,12 +2439,14 @@ function renderInv() {
     var h = cellTxt(ws, inv.headerRow, c);
     if (h !== '' && inv.photoCols.indexOf(c) < 0) headers.push({ c: c, h: h });
   }
+  var hasBc = putBarcodeFirst(headers); // 条形码列提到首位
   for (var hk = 0; hk < headers.length; hk++) {
     var op = document.createElement('option');
     op.value = String(headers[hk].c);
     op.textContent = headers[hk].h;
     sel.appendChild(op);
   }
+  if (hasBc) sel.value = String(headers[0].c); // 默认选中条形码列
   // 行卡片
   for (var i = 0; i < inv.rows.length; i++) {
     (function (r) {
@@ -2431,21 +2488,25 @@ function renderInv() {
 }
 
 /* ---------- 填写页（问卷式盘点：每字段一个问题） ---------- */
-function openFillPage(r) {
+function openFillPage(r, fillAll) {
   var inv = state.inv;
   if (!inv) return;
+  state.fillAllCols = !!fillAll; // 新增行的问卷：包含全部列表头
   var ws = state.wb.Sheets[inv.sheet];
   state.inv.cur = r;
   var idx = inv.rows.indexOf(r);
-  var no = cellTxt(ws, r, XLSX.utils.decode_range(ws['!ref']).s.c);
+  var R = XLSX.utils.decode_range(ws['!ref']);
+  var no = cellTxt(ws, r, R.s.c);
   // 完成度
   var st = invRowStatus(r);
   $('fillTitle').textContent = '记录 ' + (idx + 1) + ' / ' + inv.rows.length + '（已填 ' + st.filled + '/' + st.total + '）';
   $('fillSub').textContent = no || ('第 ' + (r + 1) + ' 行');
   var html = '';
+  var qCols = fillColsList(); // 新增行（fillAll）时是全部列表头，平时是红色待填列
   // 顶部：被盘点物品信息（按表头关键词显示：型号 / 存放地点 / 使用状况 / 使用部门名称，供对照）
+  // 新增行的问卷所有列都要填、信息区无对照意义，跳过
   var infoParts = [];
-  var R = XLSX.utils.decode_range(ws['!ref']);
+  if (!state.fillAllCols) {
   var INFO_KEYS = ['型号', '存放地点', '使用状况', '使用部门名称'];
   for (var ki = 0; ki < INFO_KEYS.length; ki++) {
     var kw = INFO_KEYS[ki];
@@ -2459,10 +2520,11 @@ function openFillPage(r) {
     }
   }
   if (infoParts.length) html += '<div class="fill-sec"><div class="fs-label">📄 ' + (no || '本记录') + '</div><div class="fs-info">' + infoParts.join('　') + '</div></div>';
+  }
   // 每个填写字段 = 一道问卷题
   var qNo = 0;
-  for (var k = 0; k < inv.cols.length; k++) {
-    var col = inv.cols[k];
+  for (var k = 0; k < qCols.length; k++) {
+    var col = qCols[k];
     qNo++;
     var addr = rcToAddr(r, col.c);
     // 草稿优先：还没点「保存」的输入也不能丢（拍照/切换记录会重绘页面）
@@ -2576,8 +2638,9 @@ function saveFillPage() {
   if (!inv) return;
   var r = inv.cur, ws = state.wb.Sheets[inv.sheet];
   var addrs = [], values = [];
-  for (var k = 0; k < inv.cols.length; k++) {
-    var col = inv.cols[k];
+  var svCols = fillColsList(); // 新增行问卷时保存全部列
+  for (var k = 0; k < svCols.length; k++) {
+    var col = svCols[k];
     if (col.isPhoto) continue;
     var addr = rcToAddr(r, col.c);
     var input = $('fi_' + addr);
@@ -2751,6 +2814,7 @@ function initApp() {
   $('btnInvBack').addEventListener('click', goHome);
   $('btnInvTable').addEventListener('click', backToTable);
   $('btnInvShare').addEventListener('click', openExportConfirm);
+  $('btnInvAdd').addEventListener('click', addInvRow);
   $('invFieldSel').addEventListener('change', function () { invSearch(); });
   $('invSearchInput').addEventListener('input', invSearch);
   $('invSearchInput').addEventListener('keydown', function (e) {
