@@ -437,7 +437,7 @@ input, textarea { font-family: inherit; font-size: 16px; } /* ≥16px 防止 iOS
 <!-- ==================== 首页（文件库：添加/删除/打开） ==================== -->
 <div id="homeScreen">
   <div class="home-head">
-    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.8</span></h1>
+    <h1>📊 Excel 盘点工具 <span class="ver-badge" id="verBadge">v4.9</span></h1>
     <p>已保存的表格都在这里，可随时打开继续填写</p>
     <p class="home-tip">💡 小技巧：浏览器菜单里点「添加到桌面」，以后像 App 一样一点就开</p>
   </div>
@@ -2503,11 +2503,11 @@ function openFillPage(r, fillAll) {
   $('fillSub').textContent = no || ('第 ' + (r + 1) + ' 行');
   var html = '';
   var qCols = fillColsList(); // 新增行（fillAll）时是全部列表头，平时是红色待填列
-  // 顶部：被盘点物品信息（按表头关键词显示：型号 / 存放地点 / 使用状况 / 使用部门名称，供对照）
+  // 顶部：被盘点物品信息（按表头关键词显示：条形码 / 名称 / 型号 / 存放地点 / 使用状况 / 使用部门名称，供对照）
   // 新增行的问卷所有列都要填、信息区无对照意义，跳过
   var infoParts = [];
   if (!state.fillAllCols) {
-  var INFO_KEYS = ['型号', '存放地点', '使用状况', '使用部门名称'];
+  var INFO_KEYS = ['条形码', '名称', '型号', '存放地点', '使用状况', '使用部门名称'];
   for (var ki = 0; ki < INFO_KEYS.length; ki++) {
     var kw = INFO_KEYS[ki];
     for (var c = R.s.c; c <= R.e.c; c++) {
